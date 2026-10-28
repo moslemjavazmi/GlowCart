@@ -1,0 +1,32 @@
+# ---------- Python / Django ----------
+*.pyc
+__pycache__/
+*.sqlite3
+.env
+*.log
+*.bak
+venv/
+.env/
+migrations/**/__pycache__/
+media/
+static/
+.tox/
+.coverage
+htmlcov/
+.pytest_cache/
+*.tar.gz
+*.zip
+
+# ---------- Node.js / Next.js ----------
+/node_modules/
+/.next/
+/out/
+.env*
+npm-debug.log*
+yarn-debug.log*
+/coverage/
+.DS_Store
+
+# ---------- IDE / Editor ----------
+.vscode/
+.idea/
