@@ -1,4 +1,3 @@
-
 import uuid
 
 from django.db import models
@@ -15,6 +14,7 @@ class Payment(models.Model):
         FAILED = "failed", "Failed"
         CANCELLED = "cancelled", "Cancelled"
         UNKNOWN = "unknown", "Unknown"
+        REVIEW_REQUIRED = "review_required", "Review Required"
 
     class Provider(models.TextChoices):
         ZARINPAL = "zarinpal", "Zarinpal"
@@ -49,33 +49,30 @@ class Payment(models.Model):
         decimal_places=2,
     )
 
-    # شناسه‌ای که درگاه برای تراکنش برمی‌گرداند.
     authority = models.CharField(
         max_length=255,
         null=True,
         blank=True,
     )
+
     payment_url = models.URLField(
         max_length=1000,
         null=True,
         blank=True,
     )
 
-    # شماره پیگیری نهایی تراکنش درگاه.
     provider_reference = models.CharField(
         max_length=255,
         null=True,
         blank=True,
     )
 
-    # جلوگیری از ایجاد چند Payment برای یک درخواست تکراری.
     idempotency_key = models.UUIDField(
         default=uuid.uuid4,
         unique=True,
         editable=False,
     )
 
-    # اطلاعات فنی پاسخ درگاه؛ بدون اطلاعات حساس کارت.
     gateway_response = models.JSONField(
         null=True,
         blank=True,
@@ -85,21 +82,45 @@ class Payment(models.Model):
         null=True,
         blank=True,
     )
-
+    review_reason = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
+
         indexes = [
-            models.Index(fields=["order", "status"]),
-            models.Index(fields=["provider", "authority"]),
+            models.Index(
+                fields=["order", "status"],
+            ),
+            models.Index(
+                fields=["provider", "authority"],
+            ),
         ]
+
         constraints = [
+            # هر Authority در یک درگاه فقط یک بار قابل ثبت است.
             models.UniqueConstraint(
                 fields=["provider", "authority"],
                 condition=~models.Q(authority__isnull=True),
                 name="unique_provider_authority",
+            ),
+
+            # هر سفارش فقط یک پرداخت فعال می‌تواند داشته باشد.
+            models.UniqueConstraint(
+                fields=["order"],
+                condition=models.Q(
+                    status__in=[
+                        "initiated",
+                        "pending",
+                        "unknown",
+                    ]
+                ),
+                name="one_active_payment_per_order",
             ),
         ]
 

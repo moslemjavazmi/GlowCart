@@ -16,12 +16,11 @@ class PaymentGateway(ABC):
         metadata: dict[str, Any] | None = None,
     ) -> dict:
         """
-        ایجاد درخواست پرداخت.
-
-        خروجی استاندارد:
+        Expected:
         {
             "authority": "...",
-            "payment_url": "..."
+            "payment_url": "...",
+            "raw_response": {}
         }
         """
         raise NotImplementedError
@@ -34,12 +33,11 @@ class PaymentGateway(ABC):
         amount: Decimal,
     ) -> dict:
         """
-        استعلام و تأیید پرداخت از سرور درگاه.
-
-        خروجی استاندارد:
+        Expected:
         {
-            "success": True,
-            "reference": "...",
+            "success": bool,
+            "reference": str | None,
+            "definitive_failure": bool,
             "raw_response": {}
         }
         """

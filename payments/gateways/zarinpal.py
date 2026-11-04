@@ -9,7 +9,19 @@ from payments.gateways.base import PaymentGateway
 
 
 class ZarinpalGatewayError(Exception):
-    pass
+    """Base exception for Zarinpal errors."""
+
+
+class ZarinpalTransportError(ZarinpalGatewayError):
+    """The request outcome could not be determined."""
+
+
+class ZarinpalResponseError(ZarinpalGatewayError):
+    """The gateway returned an invalid or unexpected response."""
+
+
+class ZarinpalRejectedError(ZarinpalGatewayError):
+    """The gateway explicitly rejected a payment request."""
 
 
 class ZarinpalGateway(PaymentGateway):
@@ -25,20 +37,26 @@ class ZarinpalGateway(PaymentGateway):
             )
 
         if self.sandbox:
-            self.api_base = "https://sandbox.zarinpal.com/pg/v4/payment"
-            self.payment_base = "https://sandbox.zarinpal.com/pg/StartPay"
+            self.api_base = (
+                "https://sandbox.zarinpal.com/pg/v4/payment"
+            )
+            self.payment_base = (
+                "https://sandbox.zarinpal.com/pg/StartPay"
+            )
         else:
-            self.api_base = "https://payment.zarinpal.com/pg/v4/payment"
-            self.payment_base = "https://payment.zarinpal.com/pg/StartPay"
+            self.api_base = (
+                "https://payment.zarinpal.com/pg/v4/payment"
+            )
+            self.payment_base = (
+                "https://payment.zarinpal.com/pg/StartPay"
+            )
 
     def _convert_amount(self, amount: Decimal) -> int:
         """
-        تبدیل مبلغ دیتابیس به واحد انتخاب‌شده در زرین‌پال.
+        Database amount is assumed to be in Toman.
 
-        فرض:
-        - قیمت دیتابیس تومان است.
-        - IRT: تومان
-        - IRR: ریال، یعنی 10 برابر تومان
+        IRT: Toman
+        IRR: Rial (10 Toman)
         """
 
         amount = Decimal(amount)
@@ -77,17 +95,25 @@ class ZarinpalGateway(PaymentGateway):
             )
 
             response.raise_for_status()
-            return response.json()
 
         except requests.RequestException as exc:
-            raise ZarinpalGatewayError(
-                "Could not communicate with Zarinpal."
+            raise ZarinpalTransportError(
+                "Could not determine the result of the Zarinpal request."
             ) from exc
 
+        try:
+            response_data = response.json()
         except ValueError as exc:
-            raise ZarinpalGatewayError(
+            raise ZarinpalResponseError(
                 "Invalid JSON response from Zarinpal."
             ) from exc
+
+        if not isinstance(response_data, dict):
+            raise ZarinpalResponseError(
+                "Unexpected response structure from Zarinpal."
+            )
+
+        return response_data
 
     def create_payment(
         self,
@@ -113,19 +139,21 @@ class ZarinpalGateway(PaymentGateway):
         errors = response_data.get("errors") or {}
 
         if errors:
-            raise ZarinpalGatewayError(
-                f"Zarinpal request failed: {errors.get('message', 'Unknown error')}"
+            raise ZarinpalRejectedError(
+                f"Zarinpal rejected request: "
+                f"{errors.get('message', 'Unknown error')}"
             )
 
         if data.get("code") != 100:
-            raise ZarinpalGatewayError(
-                f"Zarinpal request rejected with code: {data.get('code')}"
+            raise ZarinpalRejectedError(
+                f"Zarinpal request rejected with code: "
+                f"{data.get('code')}"
             )
 
         authority = data.get("authority")
 
         if not authority:
-            raise ZarinpalGatewayError(
+            raise ZarinpalResponseError(
                 "Zarinpal did not return an authority."
             )
 
@@ -153,26 +181,41 @@ class ZarinpalGateway(PaymentGateway):
         data = response_data.get("data") or {}
         errors = response_data.get("errors") or {}
 
+        # An error response is not automatically proof
+        # that the customer was not charged.
         if errors:
             return {
                 "success": False,
                 "reference": None,
+                "definitive_failure": False,
                 "raw_response": response_data,
             }
 
         code = data.get("code")
 
-        # 100 = پرداخت با موفقیت تأیید شده
-        # 101 = قبلاً تأیید شده است
-        if code in [100, 101]:
+        # 100: payment verified
+        # 101: payment was already verified
+        if code in (100, 101):
+            reference = data.get("ref_id")
+
+            if reference is None:
+                raise ZarinpalResponseError(
+                    "Successful verification did not include ref_id."
+                )
+
             return {
                 "success": True,
-                "reference": data.get("ref_id"),
+                "reference": str(reference),
+                "definitive_failure": False,
                 "raw_response": response_data,
             }
 
+        # Until individual negative codes are mapped and
+        # confirmed from the gateway documentation, keep
+        # the result unresolved.
         return {
             "success": False,
             "reference": None,
+            "definitive_failure": False,
             "raw_response": response_data,
         }

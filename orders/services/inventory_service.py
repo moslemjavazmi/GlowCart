@@ -1,26 +1,68 @@
+
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from orders.models import (
     Order,
     InventoryReservation,
+    ProductVariant,
+)
+
+from promotions.services.coupon_service import (
+    release_coupon_reservation,
 )
 
 
 @transaction.atomic
 def release_order_inventory(order_id):
+
+    # -----------------------------------------------------
+    # STEP 1: Lock order
+    # -----------------------------------------------------
+
     order = (
         Order.objects
         .select_for_update()
-        .get(id=order_id)
+        .filter(id=order_id)
+        .first()
     )
 
-    # سفارش پرداخت‌شده یا سفارش منقضی‌شده را دوباره آزاد نکن
+    if not order:
+        return False
+
     if order.status != Order.Status.AWAITING_PAYMENT:
         return False
 
     if order.inventory_released_at is not None:
         return False
+
+    now = timezone.now()
+
+    if order.expires_at and order.expires_at > now:
+        return False
+
+    # -----------------------------------------------------
+    # STEP 2: Check uncertain payments
+    # -----------------------------------------------------
+
+    from payments.models import Payment
+
+    has_uncertain_payment = Payment.objects.filter(
+        order=order,
+        status__in=[
+            Payment.Status.INITIATED,
+            Payment.Status.PENDING,
+            Payment.Status.UNKNOWN,
+        ],
+    ).exists()
+
+    if has_uncertain_payment:
+        return False
+
+    # -----------------------------------------------------
+    # STEP 3: Lock active reservations
+    # -----------------------------------------------------
 
     reservations = list(
         InventoryReservation.objects
@@ -29,25 +71,49 @@ def release_order_inventory(order_id):
             order=order,
             status=InventoryReservation.Status.ACTIVE,
         )
-        .select_related("variant")
     )
 
+    # -----------------------------------------------------
+    # STEP 4: Restore inventory
+    # -----------------------------------------------------
+
     for reservation in reservations:
-        variant = reservation.variant
 
-        variant.stock += reservation.quantity
-        variant.save(update_fields=["stock"])
-
-        reservation.status = InventoryReservation.Status.RELEASED
-        reservation.released_at = timezone.now()
-        reservation.save(
-            update_fields=["status", "released_at"]
+        variant = (
+            ProductVariant.objects
+            .select_for_update()
+            .get(id=reservation.variant_id)
         )
 
-    now = timezone.now()
+        ProductVariant.objects.filter(
+            id=variant.id
+        ).update(
+            stock=F("stock") + reservation.quantity
+        )
+
+        reservation.status = InventoryReservation.Status.RELEASED
+        reservation.released_at = now
+
+        reservation.save(
+            update_fields=[
+                "status",
+                "released_at",
+            ]
+        )
+
+    # -----------------------------------------------------
+    # STEP 5: Release coupon reservation
+    # -----------------------------------------------------
+
+    release_coupon_reservation(order_id=order.id)
+
+    # -----------------------------------------------------
+    # STEP 6: Expire order
+    # -----------------------------------------------------
 
     order.status = Order.Status.EXPIRED
     order.inventory_released_at = now
+
     order.save(
         update_fields=[
             "status",
