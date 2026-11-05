@@ -1,10 +1,9 @@
-
 from django.urls import path
 
 from payments.views import (
     InitializePaymentView,
     PaymentDetailView,
-     ZarinpalCallbackView,
+    ZarinpalCallbackView,
 )
 
 
@@ -16,7 +15,7 @@ urlpatterns = [
     ),
 
     path(
-        "callback/",
+        "callback/zarinpal/",
         ZarinpalCallbackView.as_view(),
         name="zarinpal-callback",
     ),

@@ -1,13 +1,13 @@
+
 from uuid import UUID
 
 from django.db.models import Prefetch
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 
-from rest_framework.permissions import IsAuthenticated
-from cart.services.cart_service import merge_guest_cart
 from cart.models import Cart, CartItem
 from cart.serializers import (
     CartSerializer,
@@ -20,6 +20,7 @@ from cart.services.cart_service import (
     update_item_quantity,
     remove_item,
     clear_cart,
+    merge_guest_cart,
 )
 
 
@@ -46,7 +47,6 @@ def get_request_cart(request):
         if cart:
             return cart, None
 
-    # اگر مهمان توکن نداشته باشد، سبد جدید ساخته می‌شود.
     cart = get_or_create_cart()
     return cart, None
 
@@ -68,7 +68,6 @@ def cart_response(cart, *, status_code=status.HTTP_200_OK):
 
     data = CartSerializer(cart).data
 
-    # مهمان باید این شناسه را برای درخواست‌های بعدی نگه دارد.
     if cart.guest_token:
         data["guest_token"] = str(cart.guest_token)
 
@@ -111,7 +110,7 @@ class AddCartItemView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        return cart_response(cart, status_code=status.HTTP_200_OK)
+        return cart_response(cart)
 
 
 class UpdateCartItemView(APIView):
@@ -169,21 +168,20 @@ class ClearCartView(APIView):
         return cart_response(cart)
 
 
-
 class MergeGuestCartView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        guest_token = request.data.get("guest_token")
+        raw_token = request.data.get("guest_token")
 
-        if not guest_token:
+        if not raw_token:
             return Response(
                 {"error": "guest_token is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
-            guest_token = UUID(str(guest_token))
+            guest_token = UUID(str(raw_token))
         except (ValueError, TypeError):
             return Response(
                 {"error": "Invalid guest token."},

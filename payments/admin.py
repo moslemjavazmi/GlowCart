@@ -1,4 +1,3 @@
-
 from django.contrib import admin
 
 from payments.models import Payment
@@ -6,6 +5,7 @@ from payments.models import Payment
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
+
     list_display = (
         "id",
         "order",
@@ -32,18 +32,33 @@ class PaymentAdmin(admin.ModelAdmin):
 
     readonly_fields = (
         "id",
+        "order",
+        "provider",
+        "status",
+        "amount",
+        "authority",
+        "payment_url",
+        "provider_reference",
         "idempotency_key",
+        "gateway_response",
+        "paid_at",
+        "review_reason",
+        "callback_authority",
+        "callback_status",
+        "callback_received_at",
         "created_at",
         "updated_at",
-        "paid_at",
-        "gateway_response",
     )
 
     ordering = ("-created_at",)
 
     def get_queryset(self, request):
+
         return (
             super()
             .get_queryset(request)
-            .select_related("order", "order__user")
+            .select_related(
+                "order",
+                "order__user",
+            )
         )

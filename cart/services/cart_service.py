@@ -1,3 +1,6 @@
+
+import uuid
+
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 
@@ -8,7 +11,10 @@ from cart.models import Cart, CartItem
 @transaction.atomic
 def get_or_create_cart(*, user=None, guest_token=None):
     if user and user.is_authenticated:
-        cart, _ = Cart.objects.get_or_create(user=user)
+        cart, _ = Cart.objects.get_or_create(
+            user=user,
+            defaults={"guest_token": None},
+        )
         return cart
 
     if guest_token:
@@ -20,7 +26,9 @@ def get_or_create_cart(*, user=None, guest_token=None):
         if cart:
             return cart
 
-    return Cart.objects.create()
+    return Cart.objects.create(
+        guest_token=uuid.uuid4(),
+    )
 
 
 @transaction.atomic
@@ -83,26 +91,25 @@ def update_item_quantity(*, cart, item_id, quantity):
     return item
 
 
+@transaction.atomic
 def remove_item(*, cart, item_id):
     item = get_object_or_404(
-        CartItem,
+        CartItem.objects.select_for_update(),
         id=item_id,
         cart=cart,
     )
-
     item.delete()
 
 
+@transaction.atomic
 def clear_cart(*, cart):
     cart.items.all().delete()
-
 
 
 @transaction.atomic
 def merge_guest_cart(*, user, guest_token):
     guest_cart = (
-        Cart.objects
-        .select_for_update()
+        Cart.objects.select_for_update()
         .filter(
             guest_token=guest_token,
             user__isnull=True,
@@ -114,21 +121,17 @@ def merge_guest_cart(*, user, guest_token):
         return Cart.objects.get_or_create(user=user)[0]
 
     user_cart = (
-        Cart.objects
-        .select_for_update()
+        Cart.objects.select_for_update()
         .filter(user=user)
         .first()
     )
 
-    # اگر کاربر هنوز Cart ندارد،
-    # همان Cart مهمان را به حساب او متصل می‌کنیم.
     if user_cart is None:
         guest_cart.user = user
         guest_cart.guest_token = None
         guest_cart.save(
             update_fields=["user", "guest_token", "updated_at"]
         )
-
         return guest_cart
 
     guest_items = (
@@ -144,8 +147,7 @@ def merge_guest_cart(*, user, guest_token):
             continue
 
         user_item = (
-            CartItem.objects
-            .select_for_update()
+            CartItem.objects.select_for_update()
             .filter(
                 cart=user_cart,
                 variant=variant,
@@ -164,14 +166,16 @@ def merge_guest_cart(*, user, guest_token):
             available_quantity,
         )
 
-        if final_quantity <= 0:
-            if user_item:
-                user_item.delete()
+        # اگر موجودی کافی نیست، آیتم مهمان را به سبد کاربر اضافه نکن.
+        # آیتم قبلی کاربر را نیز حذف نکن.
+        if final_quantity <= existing_quantity:
             continue
 
         if user_item:
             user_item.quantity = final_quantity
-            user_item.save(update_fields=["quantity", "updated_at"])
+            user_item.save(
+                update_fields=["quantity", "updated_at"]
+            )
         else:
             CartItem.objects.create(
                 cart=user_cart,
@@ -179,7 +183,6 @@ def merge_guest_cart(*, user, guest_token):
                 quantity=final_quantity,
             )
 
-    # بعد از انتقال آیتم‌ها، سبد مهمان حذف می‌شود.
     guest_cart.delete()
 
     return user_cart

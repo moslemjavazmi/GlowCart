@@ -1,3 +1,4 @@
+
 import uuid
 
 from django.conf import settings
@@ -15,7 +16,6 @@ class Cart(models.Model):
         editable=False,
     )
 
-    # برای کاربران واردشده
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -24,9 +24,8 @@ class Cart(models.Model):
         blank=True,
     )
 
-    # برای کاربران مهمان
     guest_token = models.UUIDField(
-        default=uuid.uuid4,
+        default=None,
         unique=True,
         editable=False,
         null=True,

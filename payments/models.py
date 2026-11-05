@@ -82,11 +82,36 @@ class Payment(models.Model):
         null=True,
         blank=True,
     )
+
     review_reason = models.CharField(
         max_length=255,
         null=True,
         blank=True,
     )
+
+    # -----------------------------------------------------
+    # Early Callback Handling
+    # -----------------------------------------------------
+
+    callback_authority = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+
+    callback_status = models.CharField(
+        max_length=30,
+        null=True,
+        blank=True,
+    )
+
+    callback_received_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    # -----------------------------------------------------
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -103,14 +128,12 @@ class Payment(models.Model):
         ]
 
         constraints = [
-            # هر Authority در یک درگاه فقط یک بار قابل ثبت است.
             models.UniqueConstraint(
                 fields=["provider", "authority"],
                 condition=~models.Q(authority__isnull=True),
                 name="unique_provider_authority",
             ),
 
-            # هر سفارش فقط یک پرداخت فعال می‌تواند داشته باشد.
             models.UniqueConstraint(
                 fields=["order"],
                 condition=models.Q(

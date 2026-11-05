@@ -313,3 +313,125 @@ def release_coupon_reservation(*, order_id):
     )
 
     return True
+
+
+
+@transaction.atomic
+def apply_coupon_to_order(*, code, user, order_id):
+
+    order = (
+        Order.objects
+        .select_for_update()
+        .filter(
+            id=order_id,
+            user=user,
+        )
+        .first()
+    )
+
+    if not order:
+        raise ValidationError({
+            "order": "Order not found."
+        })
+
+    if order.status != Order.Status.AWAITING_PAYMENT:
+        raise ValidationError({
+            "order": "Coupon cannot be changed for this order."
+        })
+
+    if order.inventory_released_at is not None:
+        raise ValidationError({
+            "order": "Inventory has already been released."
+        })
+
+    if order.expires_at and order.expires_at <= timezone.now():
+        raise ValidationError({
+            "order": "Order has expired."
+        })
+
+    # Coupon is calculated against subtotal, not shipping.
+    reservation = reserve_coupon(
+        code=code,
+        user=user,
+        order_id=order.id,
+        discountable_amount=order.subtotal,
+    )
+
+    order.discount_amount = reservation.discount_amount
+
+    order.total_amount = (
+        order.subtotal
+        + order.shipping_cost
+        - order.discount_amount
+    )
+
+    order.save(
+        update_fields=[
+            "discount_amount",
+            "total_amount",
+            "updated_at",
+        ]
+    )
+
+    return order
+
+
+@transaction.atomic
+def remove_coupon_from_order(*, user, order_id):
+
+    order = (
+        Order.objects
+        .select_for_update()
+        .filter(
+            id=order_id,
+            user=user,
+        )
+        .first()
+    )
+
+    if not order:
+        raise ValidationError({
+            "order": "Order not found."
+        })
+
+    if order.status != Order.Status.AWAITING_PAYMENT:
+        raise ValidationError({
+            "order": "Coupon cannot be removed from this order."
+        })
+
+    reservation = (
+        CouponReservation.objects
+        .select_for_update()
+        .filter(
+            order=order,
+            status=CouponReservation.Status.ACTIVE,
+        )
+        .first()
+    )
+
+    if reservation:
+        reservation.status = CouponReservation.Status.RELEASED
+        reservation.released_at = timezone.now()
+
+        reservation.save(
+            update_fields=[
+                "status",
+                "released_at",
+            ]
+        )
+
+    order.discount_amount = Decimal("0.00")
+
+    order.total_amount = (
+        order.subtotal + order.shipping_cost
+    )
+
+    order.save(
+        update_fields=[
+            "discount_amount",
+            "total_amount",
+            "updated_at",
+        ]
+    )
+
+    return order

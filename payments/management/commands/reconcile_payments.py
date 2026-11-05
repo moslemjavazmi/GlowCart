@@ -1,5 +1,4 @@
-
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from payments.services.reconciliation_service import (
     reconcile_unresolved_payments,
@@ -7,9 +6,11 @@ from payments.services.reconciliation_service import (
 
 
 class Command(BaseCommand):
+
     help = "Reconcile unresolved payments with payment gateways."
 
     def add_arguments(self, parser):
+
         parser.add_argument(
             "--limit",
             type=int,
@@ -18,7 +19,13 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+
         limit = options["limit"]
+
+        if limit < 1:
+            raise CommandError(
+                "--limit must be greater than zero."
+            )
 
         result = reconcile_unresolved_payments(
             limit=limit

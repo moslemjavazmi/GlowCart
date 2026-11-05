@@ -77,16 +77,16 @@ class OrderSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class CreateOrderSerializer(serializers.Serializer):
 
+class CreateOrderSerializer(serializers.Serializer):
     address_id = serializers.UUIDField()
 
     def validate_address_id(self, value):
-        user = self.context["request"].user
+        request = self.context.get("request")
 
-        if not Address.objects.filter(
+        if not request or not Address.objects.filter(
             id=value,
-            user=user,
+            user=request.user,
         ).exists():
             raise serializers.ValidationError(
                 "Address not found."

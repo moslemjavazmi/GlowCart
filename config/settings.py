@@ -226,21 +226,6 @@ SWAGGER_SETTINGS = {
 # Payment - General
 # --------------------------------------------------
 
-PAYMENT_CALLBACK_URL = os.getenv(
-    "PAYMENT_CALLBACK_URL",
-    "http://localhost:8000/api/payments/callback/",
-)
-
-FRONTEND_PAYMENT_RESULT_URL = os.getenv(
-    "FRONTEND_PAYMENT_RESULT_URL",
-    "http://localhost:3000/payment/result",
-)
-
-
-# --------------------------------------------------
-# Zarinpal
-# --------------------------------------------------
-
 ZARINPAL_MERCHANT_ID = os.getenv(
     "ZARINPAL_MERCHANT_ID",
     "",
@@ -253,6 +238,16 @@ ZARINPAL_SANDBOX = (
 ZARINPAL_CURRENCY = os.getenv(
     "ZARINPAL_CURRENCY",
     "IRT",
+)
+
+PAYMENT_CALLBACK_URL = os.getenv(
+    "PAYMENT_CALLBACK_URL",
+    "http://localhost:8000/api/payments/callback/zarinpal/",
+)
+
+FRONTEND_PAYMENT_RESULT_URL = os.getenv(
+    "FRONTEND_PAYMENT_RESULT_URL",
+    "http://localhost:3000/payment/result",
 )
 
 

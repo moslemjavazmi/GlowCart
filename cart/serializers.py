@@ -1,10 +1,14 @@
+
 from rest_framework import serializers
 
 from cart.models import Cart, CartItem
 
 
 class CartItemSerializer(serializers.ModelSerializer):
-    variant_id = serializers.UUIDField(source="variant.id", read_only=True)
+    variant_id = serializers.UUIDField(
+        source="variant.id",
+        read_only=True,
+    )
     product_name = serializers.CharField(
         source="variant.product.name",
         read_only=True,
@@ -17,12 +21,7 @@ class CartItemSerializer(serializers.ModelSerializer):
         source="variant.sku",
         read_only=True,
     )
-    unit_price = serializers.DecimalField(
-        source="variant.price",
-        max_digits=10,
-        decimal_places=2,
-        read_only=True,
-    )
+    unit_price = serializers.SerializerMethodField()
     line_total = serializers.SerializerMethodField()
 
     class Meta:
@@ -37,6 +36,9 @@ class CartItemSerializer(serializers.ModelSerializer):
             "quantity",
             "line_total",
         ]
+
+    def get_unit_price(self, obj):
+        return str(obj.variant.price)
 
     def get_line_total(self, obj):
         return str(obj.variant.price * obj.quantity)
