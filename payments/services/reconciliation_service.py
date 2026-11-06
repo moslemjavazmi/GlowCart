@@ -1,22 +1,39 @@
-from django.db import transaction
+from datetime import timedelta
+
+from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 
 from payments.models import Payment
 from payments.gateways.factory import get_payment_gateway
-from payments.gateways.zarinpal import ZarinpalGatewayError
 
 from payments.services.payment_service import (
     finalize_verified_payment,
+    _mark_payment_failed,
+    _mark_payment_review_required,
+    _store_verification_result,
 )
 
 
+INITIATED_STALE_AFTER = timedelta(
+    seconds=max(
+        1,
+        getattr(
+            settings,
+            "PAYMENT_INITIATED_STALE_AFTER_SECONDS",
+            300,
+        ),
+    )
+)
+
+
+# =========================================================
+# Reconcile Single Payment
+# =========================================================
+
 def reconcile_payment(payment_id):
 
-    payment = (
-        Payment.objects
-        .select_related("order")
-        .get(id=payment_id)
-    )
+    payment = Payment.objects.get(id=payment_id)
 
     # -----------------------------------------------------
     # STEP 1: Check final states
@@ -34,13 +51,36 @@ def reconcile_payment(payment_id):
             "result": "already_final",
         }
 
+    # -----------------------------------------------------
+    # STEP 2: Handle stale INITIATED payments
+    # -----------------------------------------------------
+
     if payment.status == Payment.Status.INITIATED:
+
+        stale_before = timezone.now() - INITIATED_STALE_AFTER
+
+        if payment.created_at > stale_before:
+            return {
+                "payment_id": str(payment.id),
+                "status": payment.status,
+                "result": "waiting_for_gateway_response",
+            }
+
+        reviewed_payment = _mark_payment_review_required(
+            payment.id,
+            reason="stale_initiated_payment",
+        )
+
         return {
             "payment_id": str(payment.id),
-            "status": payment.status,
+            "status": reviewed_payment.status,
             "result": "manual_review_required",
-            "reason": "missing_confirmation_from_gateway",
+            "reason": "stale_initiated_payment",
         }
+
+    # -----------------------------------------------------
+    # STEP 3: Validate status
+    # -----------------------------------------------------
 
     if payment.status not in [
         Payment.Status.PENDING,
@@ -52,55 +92,54 @@ def reconcile_payment(payment_id):
             "result": "unsupported_status",
         }
 
+    # -----------------------------------------------------
+    # STEP 4: Validate authority
+    # -----------------------------------------------------
+
     if not payment.authority:
+
+        reviewed_payment = _mark_payment_review_required(
+            payment.id,
+            reason="missing_authority",
+        )
+
         return {
             "payment_id": str(payment.id),
-            "status": payment.status,
+            "status": reviewed_payment.status,
             "result": "manual_review_required",
             "reason": "missing_authority",
         }
 
     # -----------------------------------------------------
-    # STEP 2: Verify with gateway
+    # STEP 5: Verify with gateway
     # -----------------------------------------------------
 
     try:
 
-        gateway = get_payment_gateway(payment.provider)
+        gateway = get_payment_gateway(
+            payment.provider
+        )
 
         result = gateway.verify_payment(
             authority=payment.authority,
             amount=payment.amount,
         )
 
-    except ZarinpalGatewayError as exc:
+    except Exception as exc:
 
-        payment.refresh_from_db(
-            fields=["status"]
+        current_payment = Payment.objects.get(
+            id=payment.id
         )
 
         return {
             "payment_id": str(payment.id),
-            "status": payment.status,
+            "status": current_payment.status,
             "result": "gateway_error",
             "error": str(exc)[:500],
         }
 
-    except Exception as exc:
-
-        payment.refresh_from_db(
-            fields=["status"]
-        )
-
-        return {
-            "payment_id": str(payment.id),
-            "status": payment.status,
-            "result": "unexpected_error",
-            "error": str(exc)[:500],
-        }
-
     # -----------------------------------------------------
-    # STEP 3: Successful payment
+    # STEP 6: Successful payment
     # -----------------------------------------------------
 
     if result.get("success") is True:
@@ -113,58 +152,42 @@ def reconcile_payment(payment_id):
         return {
             "payment_id": str(payment.id),
             "status": finalized_payment.status,
-            "result": "verified",
+            "result": (
+                "verified"
+                if finalized_payment.status == Payment.Status.SUCCESS
+                else "manual_review_required"
+            ),
+            "reason": finalized_payment.review_reason,
         }
 
     # -----------------------------------------------------
-    # STEP 4: Definitive failure
+    # STEP 7: Definitive failure
     # -----------------------------------------------------
 
     if result.get("definitive_failure") is True:
 
-        with transaction.atomic():
-
-            locked_payment = (
-                Payment.objects
-                .select_for_update()
-                .get(id=payment.id)
-            )
-
-            if locked_payment.status in [
-                Payment.Status.PENDING,
-                Payment.Status.UNKNOWN,
-            ]:
-
-                locked_payment.status = Payment.Status.FAILED
-
-                locked_payment.gateway_response = (
-                    result.get("raw_response") or {}
-                )
-
-                locked_payment.save(
-                    update_fields=[
-                        "status",
-                        "gateway_response",
-                        "updated_at",
-                    ]
-                )
+        failed_payment = _mark_payment_failed(
+            payment.id,
+            result,
+        )
 
         return {
             "payment_id": str(payment.id),
-            "status": locked_payment.status,
+            "status": failed_payment.status,
             "result": (
                 "definitive_failure"
-                if locked_payment.status == Payment.Status.FAILED
+                if failed_payment.status == Payment.Status.FAILED
                 else "state_changed"
             ),
         }
 
     # -----------------------------------------------------
-    # STEP 5: Ambiguous result
+    # STEP 8: Ambiguous result
     # -----------------------------------------------------
 
-    current_payment = Payment.objects.get(
-        id=payment.id
+    current_payment = _store_verification_result(
+        payment.id,
+        result,
     )
 
     return {
@@ -174,19 +197,37 @@ def reconcile_payment(payment_id):
     }
 
 
+# =========================================================
+# Reconcile Unresolved Payments
+# =========================================================
+
 def reconcile_unresolved_payments(limit=100):
 
-    if not isinstance(limit, int) or limit < 1:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or limit < 1
+    ):
         raise ValueError(
             "limit must be a positive integer."
         )
 
+    now = timezone.now()
+
+    stale_before = now - INITIATED_STALE_AFTER
+
     payment_ids = list(
         Payment.objects.filter(
-            status__in=[
-                Payment.Status.PENDING,
-                Payment.Status.UNKNOWN,
-            ]
+            Q(
+                status__in=[
+                    Payment.Status.PENDING,
+                    Payment.Status.UNKNOWN,
+                ]
+            )
+            | Q(
+                status=Payment.Status.INITIATED,
+                created_at__lte=stale_before,
+            )
         )
         .order_by("created_at")
         .values_list("id", flat=True)[:limit]

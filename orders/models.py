@@ -200,6 +200,21 @@ class OrderItem(models.Model):
         max_digits=12,
         decimal_places=2,
     )
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gte=1),
+                name="order_item_quantity_gte_1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(unit_price__gte=0),
+                name="order_item_price_non_negative",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(line_total__gte=0),
+                name="order_item_total_non_negative",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.product_name} x {self.quantity}"

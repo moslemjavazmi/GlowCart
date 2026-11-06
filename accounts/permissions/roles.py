@@ -1,9 +1,10 @@
+
 from rest_framework.permissions import BasePermission
 
 
 class IsAdminRole(BasePermission):
     """
-    Only users with admin role can access.
+    Allows active admin-role users and active Django superusers.
     """
 
     message = "You must be an admin to access this resource."
@@ -14,13 +15,16 @@ class IsAdminRole(BasePermission):
         return (
             user.is_authenticated
             and user.is_active
-            and user.role == "admin"
+            and (
+                user.is_superuser
+                or user.role == "admin"
+            )
         )
 
 
 class IsSupportOrAdmin(BasePermission):
     """
-    Support and admin users can access.
+    Allows active support users, admin users, and superusers.
     """
 
     message = "You do not have permission to access this resource."
@@ -31,5 +35,8 @@ class IsSupportOrAdmin(BasePermission):
         return (
             user.is_authenticated
             and user.is_active
-            and user.role in ["support", "admin"]
+            and (
+                user.is_superuser
+                or user.role in ["support", "admin"]
+            )
         )

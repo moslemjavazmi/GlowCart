@@ -10,7 +10,12 @@ from orders.views.order_views import (
     OrderDetailView,
 )
 
-
+from orders.views.order_views import (
+    CreateOrderView,
+    OrderListView,
+    OrderDetailView,
+    CancelOrderView,
+)
 router = DefaultRouter()
 
 router.register(
@@ -21,8 +26,6 @@ router.register(
 
 
 urlpatterns = [
-    path("", include(router.urls)),
-
     path(
         "create/",
         CreateOrderView.as_view(),
@@ -36,8 +39,16 @@ urlpatterns = [
     ),
 
     path(
+        "<uuid:order_id>/cancel/",
+        CancelOrderView.as_view(),
+        name="cancel-order",
+    ),
+
+    path(
         "<uuid:id>/",
         OrderDetailView.as_view(),
         name="order-detail",
     ),
+
+    path("", include(router.urls)),
 ]

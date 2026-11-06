@@ -13,14 +13,26 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from orders.models import Order
+
 from payments.models import Payment
 from payments.serializers import InitializePaymentSerializer
+
 from payments.services.payment_service import (
     initialize_payment,
     verify_payment,
 )
 
+
 logger = logging.getLogger(__name__)
+
+
+FINAL_PAYMENT_STATUSES = [
+    Payment.Status.SUCCESS,
+    Payment.Status.FAILED,
+    Payment.Status.CANCELLED,
+    Payment.Status.REVIEW_REQUIRED,
+]
 
 
 # =========================================================
@@ -73,6 +85,7 @@ class PaymentDetailView(APIView):
 
         payment = (
             Payment.objects
+            .select_related("order")
             .filter(
                 id=payment_id,
                 order__user=request.user,
@@ -87,6 +100,7 @@ class PaymentDetailView(APIView):
             {
                 "payment_id": str(payment.id),
                 "order_id": str(payment.order_id),
+                "order_number": payment.order.order_number,
                 "status": payment.status,
                 "amount": str(payment.amount),
                 "provider": payment.provider,
@@ -149,7 +163,6 @@ class ZarinpalCallbackView(APIView):
 
         payment_id = request.query_params.get("payment_id")
 
-        # New callback URLs contain payment_id.
         if payment_id:
 
             try:
@@ -168,7 +181,9 @@ class ZarinpalCallbackView(APIView):
                 .first()
             )
 
-        # Backward compatibility for old callback URLs.
+        # Backward compatibility for callbacks
+        # without payment_id.
+
         return (
             Payment.objects
             .select_related("order")
@@ -180,6 +195,33 @@ class ZarinpalCallbackView(APIView):
         )
 
     # -----------------------------------------------------
+    # Lock Order and Payment
+    # -----------------------------------------------------
+
+    def _lock_payment(self, payment_id):
+
+        order_id = (
+            Payment.objects
+            .only("order_id")
+            .get(id=payment_id)
+            .order_id
+        )
+
+        order = (
+            Order.objects
+            .select_for_update()
+            .get(id=order_id)
+        )
+
+        payment = (
+            Payment.objects
+            .select_for_update()
+            .get(id=payment_id)
+        )
+
+        return order, payment
+
+    # -----------------------------------------------------
     # GET Callback
     # -----------------------------------------------------
 
@@ -187,6 +229,10 @@ class ZarinpalCallbackView(APIView):
 
         authority = request.query_params.get("Authority")
         gateway_status = request.query_params.get("Status")
+
+        # -------------------------------------------------
+        # Validate callback parameters
+        # -------------------------------------------------
 
         if not authority:
             return Response(
@@ -200,14 +246,30 @@ class ZarinpalCallbackView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        authority = authority.strip()
+
+        if not authority or len(authority) > 255:
+            return Response(
+                {"detail": "Authority is invalid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         gateway_status = gateway_status.upper()
 
-        # Accept only documented callback status values.
+        if not authority:
+            return Response(
+                {"detail": "Authority is invalid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if gateway_status not in ["OK", "NOK"]:
             return Response(
                 {"detail": "Invalid gateway status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # -------------------------------------------------
+        # Find payment
+        # -------------------------------------------------
 
         payment = self._get_payment(
             request,
@@ -215,6 +277,7 @@ class ZarinpalCallbackView(APIView):
         )
 
         if payment is None:
+
             logger.warning(
                 "Zarinpal callback payment not found. Authority: %s",
                 authority,
@@ -226,86 +289,70 @@ class ZarinpalCallbackView(APIView):
             )
 
         # -------------------------------------------------
-        # Already finalized
-        # -------------------------------------------------
-
-        if payment.status == Payment.Status.SUCCESS:
-            return self._redirect_result(
-                payment=payment,
-                result="success",
-            )
-
-        if payment.status == Payment.Status.REVIEW_REQUIRED:
-            return self._redirect_result(
-                payment=payment,
-                result="review_required",
-            )
-
-        if payment.status in [
-            Payment.Status.FAILED,
-            Payment.Status.CANCELLED,
-        ]:
-            return self._redirect_result(
-                payment=payment,
-                result=payment.status,
-            )
-
-        # -------------------------------------------------
-        # Lock payment
+        # Lock payment and order
         # -------------------------------------------------
 
         with transaction.atomic():
 
-            locked_payment = (
-                Payment.objects
-                .select_for_update()
-                .get(id=payment.id)
+            order, locked_payment = self._lock_payment(
+                payment.id
             )
 
-            # Another callback may have finalized payment.
-            if locked_payment.status in [
-                Payment.Status.SUCCESS,
-                Payment.Status.REVIEW_REQUIRED,
-                Payment.Status.FAILED,
-                Payment.Status.CANCELLED,
-            ]:
-                pass
+            # -------------------------------------------------
+            # Authority validation
+            # -------------------------------------------------
+
+            if locked_payment.authority:
+
+                if locked_payment.authority != authority:
+
+                    logger.warning(
+                        "Zarinpal authority mismatch for payment %s",
+                        locked_payment.id,
+                    )
+
+                    return Response(
+                        {"detail": "Payment authority mismatch."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
             # -------------------------------------------------
             # Early callback
             # -------------------------------------------------
 
-            elif not locked_payment.authority:
+            else:
 
-                # Authority is not saved yet.
-                # Store callback temporarily.
-                locked_payment.callback_authority = authority
-                locked_payment.callback_status = gateway_status
-                locked_payment.callback_received_at = timezone.now()
+                if locked_payment.status in [
+                    Payment.Status.INITIATED,
+                    Payment.Status.UNKNOWN,
+                ]:
 
-                locked_payment.save(
-                    update_fields=[
-                        "callback_authority",
-                        "callback_status",
-                        "callback_received_at",
-                        "updated_at",
-                    ]
-                )
+                    locked_payment.callback_authority = authority
+                    locked_payment.callback_status = gateway_status
+                    locked_payment.callback_received_at = timezone.now()
 
-            # -------------------------------------------------
-            # Authority mismatch
-            # -------------------------------------------------
+                    locked_payment.save(
+                        update_fields=[
+                            "callback_authority",
+                            "callback_status",
+                            "callback_received_at",
+                            "updated_at",
+                        ]
+                    )
 
-            elif locked_payment.authority != authority:
+                else:
 
-                logger.warning(
-                    "Zarinpal callback authority mismatch for payment %s",
-                    locked_payment.id,
-                )
+                    logger.warning(
+                        "Callback received without payment authority. "
+                        "Payment: %s, status: %s",
+                        locked_payment.id,
+                        locked_payment.status,
+                    )
 
-            # If authority matches, continue after transaction.
+        # -------------------------------------------------
+        # Reload payment
+        # -------------------------------------------------
 
-        # Reload payment and order.
         payment = (
             Payment.objects
             .select_related("order")
@@ -313,28 +360,22 @@ class ZarinpalCallbackView(APIView):
         )
 
         # -------------------------------------------------
-        # Check final states again
+        # Check final states
         # -------------------------------------------------
 
-        if payment.status == Payment.Status.SUCCESS:
-            return self._redirect_result(
-                payment=payment,
-                result="success",
-            )
+        if payment.status in FINAL_PAYMENT_STATUSES:
 
-        if payment.status == Payment.Status.REVIEW_REQUIRED:
             return self._redirect_result(
                 payment=payment,
-                result="review_required",
-            )
-
-        if payment.status in [
-            Payment.Status.FAILED,
-            Payment.Status.CANCELLED,
-        ]:
-            return self._redirect_result(
-                payment=payment,
-                result=payment.status,
+                result=(
+                    "review_required"
+                    if payment.status == Payment.Status.REVIEW_REQUIRED
+                    else (
+                        "success"
+                        if payment.status == Payment.Status.SUCCESS
+                        else payment.status
+                    )
+                ),
             )
 
         # -------------------------------------------------
@@ -342,63 +383,25 @@ class ZarinpalCallbackView(APIView):
         # -------------------------------------------------
 
         if not payment.authority:
+
             return self._redirect_result(
                 payment=payment,
                 result="verification_pending",
             )
 
         # -------------------------------------------------
-        # Authority validation
+        # Authority validation again
         # -------------------------------------------------
 
         if payment.authority != authority:
-            return self._redirect_result(
-                payment=payment,
-                result="verification_pending",
+
+            return Response(
+                {"detail": "Payment authority mismatch."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # -------------------------------------------------
-        # Non-success callback
-        # -------------------------------------------------
-
-        if gateway_status == "NOK":
-
-            with transaction.atomic():
-
-                locked_payment = (
-                    Payment.objects
-                    .select_for_update()
-                    .get(id=payment.id)
-                )
-
-                # Only cancel a pending payment.
-                # UNKNOWN remains unresolved because a callback
-                # alone is not sufficient to prove no charge occurred.
-
-                if locked_payment.status == Payment.Status.PENDING:
-
-                    locked_payment.status = Payment.Status.CANCELLED
-
-                    locked_payment.save(
-                        update_fields=[
-                            "status",
-                            "updated_at",
-                        ]
-                    )
-
-            payment = (
-                Payment.objects
-                .select_related("order")
-                .get(id=payment.id)
-            )
-
-            return self._redirect_result(
-                payment=payment,
-                result=payment.status,
-            )
-
-        # -------------------------------------------------
-        # Verify payment with Zarinpal
+        # Verify with gateway
         # -------------------------------------------------
 
         try:
@@ -425,6 +428,10 @@ class ZarinpalCallbackView(APIView):
                 result="verification_pending",
             )
 
+        # -------------------------------------------------
+        # Reload final payment
+        # -------------------------------------------------
+
         payment = (
             Payment.objects
             .select_related("order")
@@ -441,15 +448,14 @@ class ZarinpalCallbackView(APIView):
         elif payment.status == Payment.Status.REVIEW_REQUIRED:
             result = "review_required"
 
-        elif payment.status in [
-            Payment.Status.PENDING,
-            Payment.Status.UNKNOWN,
-            Payment.Status.INITIATED,
-        ]:
-            result = "verification_pending"
+        elif payment.status == Payment.Status.FAILED:
+            result = "failed"
+
+        elif payment.status == Payment.Status.CANCELLED:
+            result = "cancelled"
 
         else:
-            result = payment.status
+            result = "verification_pending"
 
         return self._redirect_result(
             payment=payment,

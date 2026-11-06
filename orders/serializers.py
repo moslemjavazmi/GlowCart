@@ -78,8 +78,17 @@ class OrderSerializer(serializers.ModelSerializer):
 
 
 
+
 class CreateOrderSerializer(serializers.Serializer):
+
     address_id = serializers.UUIDField()
+
+    coupon_code = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=50,
+        trim_whitespace=True,
+    )
 
     def validate_address_id(self, value):
         request = self.context.get("request")
@@ -93,3 +102,9 @@ class CreateOrderSerializer(serializers.Serializer):
             )
 
         return value
+
+    def validate_coupon_code(self, value):
+        value = value.strip().upper()
+
+        # Empty coupon means no coupon.
+        return value or None

@@ -1,16 +1,15 @@
 
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
+
 from rest_framework.exceptions import ValidationError
 
 from catalog.models import ProductVariant
 from cart.models import Cart, CartItem
-
-from datetime import timedelta
-
 
 from orders.models import (
     Order,
@@ -19,16 +18,35 @@ from orders.models import (
     InventoryReservation,
 )
 
+from promotions.services.coupon_service import reserve_coupon
+
+
 def generate_order_number():
     date_part = timezone.now().strftime("%Y%m%d")
-    random_part = uuid.uuid4().hex[:10].upper()
+    random_part = uuid.uuid4().hex[:12].upper()
 
     return f"GC-{date_part}-{random_part}"
 
 
 @transaction.atomic
-def create_order(*, user, address_id):
-    # 1. آدرس باید متعلق به همین کاربر باشد.
+def create_order(*, user, address_id, coupon_code=None):
+    """
+    Create an order from the user's cart.
+
+    All operations are atomic:
+    - Address validation
+    - Cart locking
+    - Product variant locking
+    - Stock validation
+    - Order creation
+    - Coupon reservation
+    - Inventory reservation
+    - Cart clearing
+    """
+
+    # -----------------------------------------------------
+    # STEP 1: Validate address ownership
+    # -----------------------------------------------------
 
     address = Address.objects.filter(
         id=address_id,
@@ -40,26 +58,34 @@ def create_order(*, user, address_id):
             "address_id": "Address not found."
         })
 
-    # 2. قفل کردن سبد خرید کاربر
+    # -----------------------------------------------------
+    # STEP 2: Lock cart
+    # -----------------------------------------------------
 
-    cart = Cart.objects.select_for_update().filter(
-        user=user
-    ).first()
+    cart = (
+        Cart.objects
+        .select_for_update()
+        .filter(user=user)
+        .first()
+    )
 
     if not cart:
         raise ValidationError({
             "cart": "Your cart is empty."
         })
 
-    # 3. دریافت آیتم‌های سبد خرید
+    # -----------------------------------------------------
+    # STEP 3: Retrieve cart items
+    # -----------------------------------------------------
 
     cart_items = list(
-        CartItem.objects.filter(
-            cart=cart
-        ).select_related(
+        CartItem.objects
+        .filter(cart=cart)
+        .select_related(
             "variant",
             "variant__product",
         )
+        .order_by("variant_id")
     )
 
     if not cart_items:
@@ -67,34 +93,57 @@ def create_order(*, user, address_id):
             "cart": "Your cart is empty."
         })
 
-    # 4. قفل کردن ردیف‌های محصولات برای جلوگیری از
-    # خرید هم‌زمان بیشتر از موجودی در PostgreSQL.
+    # -----------------------------------------------------
+    # STEP 4: Lock variants in deterministic order
+    # -----------------------------------------------------
 
-    variant_ids = [item.variant_id for item in cart_items]
+    variant_ids = [
+        item.variant_id
+        for item in cart_items
+    ]
 
     locked_variants = {
         variant.id: variant
-        for variant in ProductVariant.objects.select_for_update().filter(
-            id__in=variant_ids
-        ).select_related("product")
+        for variant in (
+            ProductVariant.objects
+            .select_for_update()
+            .filter(id__in=variant_ids)
+            .select_related("product")
+            .order_by("id")
+        )
     }
+
+    # -----------------------------------------------------
+    # STEP 5: Validate products and calculate subtotal
+    # -----------------------------------------------------
 
     subtotal = Decimal("0.00")
     order_items_data = []
 
-    # 5. بررسی قیمت، وضعیت و موجودی
-
     for cart_item in cart_items:
-        variant = locked_variants.get(cart_item.variant_id)
+
+        variant = locked_variants.get(
+            cart_item.variant_id
+        )
 
         if not variant:
             raise ValidationError({
                 "cart": "A product variant no longer exists."
             })
 
-        if not variant.is_active or not variant.product.is_active:
+        if (
+            not variant.is_active
+            or not variant.product.is_active
+        ):
             raise ValidationError({
-                "cart": f"{variant.name} is no longer available."
+                "cart": (
+                    f"{variant.name} is no longer available."
+                )
+            })
+
+        if cart_item.quantity < 1:
+            raise ValidationError({
+                "cart": "Invalid cart item quantity."
             })
 
         if cart_item.quantity > variant.stock:
@@ -120,7 +169,9 @@ def create_order(*, user, address_id):
             "line_total": line_total,
         })
 
-    # 6. محاسبه مبلغ نهایی در Backend
+    # -----------------------------------------------------
+    # STEP 6: Calculate initial totals
+    # -----------------------------------------------------
 
     shipping_cost = Decimal("0.00")
     discount_amount = Decimal("0.00")
@@ -131,14 +182,16 @@ def create_order(*, user, address_id):
         - discount_amount
     )
 
-    if total_amount < 0:
-        raise ValidationError({
-            "total_amount": "Invalid order total."
-        })
+    expires_at = (
+        timezone.now() + timedelta(minutes=20)
+    )
 
-    # 7. ساخت سفارش با Snapshot آدرس
-    expires_at = timezone.now() + timedelta(minutes=20)
+    # -----------------------------------------------------
+    # STEP 7: Create order
+    # -----------------------------------------------------
+
     order = Order.objects.create(
+        order_number=generate_order_number(),
         user=user,
         address=address,
         status=Order.Status.AWAITING_PAYMENT,
@@ -148,6 +201,7 @@ def create_order(*, user, address_id):
         total_amount=total_amount,
         expires_at=expires_at,
 
+        # Address snapshot
         recipient_name=address.recipient_name,
         phone_number=address.phone_number,
         province=address.province,
@@ -156,35 +210,108 @@ def create_order(*, user, address_id):
         address_line=address.address_line,
     )
 
-    # 8. ساخت آیتم‌های سفارش و کاهش موجودی
+    # -----------------------------------------------------
+    # STEP 8: Create order items
+    # -----------------------------------------------------
 
-    order_items = []
+    order_items = [
+        OrderItem(
+            order=order,
+            **item_data,
+        )
+        for item_data in order_items_data
+    ]
+
+    OrderItem.objects.bulk_create(order_items)
+
+    # -----------------------------------------------------
+    # STEP 9: Reserve coupon if supplied
+    # -----------------------------------------------------
+
+    if coupon_code and coupon_code.strip():
+
+        coupon_reservation = reserve_coupon(
+            code=coupon_code,
+            user=user,
+            order_id=order.id,
+            discountable_amount=subtotal,
+        )
+
+        discount_amount = (
+            coupon_reservation.discount_amount
+        )
+
+        total_amount = (
+            subtotal
+            + shipping_cost
+            - discount_amount
+        )
+
+        if total_amount <= Decimal("0.00"):
+            raise ValidationError({
+                "coupon": (
+                    "The discount cannot make the order total "
+                    "zero or negative."
+                )
+            })
+
+        order.discount_amount = discount_amount
+        order.total_amount = total_amount
+
+        order.save(
+            update_fields=[
+                "discount_amount",
+                "total_amount",
+                "updated_at",
+            ]
+        )
+
+    # -----------------------------------------------------
+    # STEP 10: Validate final amount
+    # -----------------------------------------------------
+
+    if order.total_amount <= Decimal("0.00"):
+        raise ValidationError({
+            "total_amount": "Invalid order total."
+        })
+
+    # -----------------------------------------------------
+    # STEP 11: Deduct stock and create reservations
+    # -----------------------------------------------------
+
+    reservations = []
 
     for item_data in order_items_data:
-        variant = item_data["variant"]
 
-        order_items.append(
-            OrderItem(
+        variant = item_data["variant"]
+        quantity = item_data["quantity"]
+
+        variant.stock -= quantity
+
+        variant.save(
+            update_fields=["stock"]
+        )
+
+        reservations.append(
+            InventoryReservation(
                 order=order,
-                **item_data,
+                variant=variant,
+                quantity=quantity,
+                expires_at=expires_at,
+                status=InventoryReservation.Status.ACTIVE,
             )
         )
 
-        variant.stock -= item_data["quantity"]
-        variant.save(update_fields=["stock"])
+    InventoryReservation.objects.bulk_create(
+        reservations
+    )
 
-    OrderItem.objects.bulk_create(order_items)
-    InventoryReservation.objects.bulk_create([
-        InventoryReservation(
-            order=order,
-            variant=item.variant,
-            quantity=item.quantity,
-            expires_at=expires_at,
-        )
-        for item in order.items.all()
-    ])
-    # 9. خالی کردن سبد خرید
+    # -----------------------------------------------------
+    # STEP 12: Clear cart
+    # -----------------------------------------------------
 
-    cart.items.all().delete()
+    CartItem.objects.filter(
+        cart=cart
+    ).delete()
 
     return order

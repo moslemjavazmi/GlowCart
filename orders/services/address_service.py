@@ -1,101 +1,189 @@
 
 from django.db import transaction
+from django.db.models.deletion import ProtectedError
+
+from rest_framework.exceptions import ValidationError
 
 from orders.models import Address
+
+
+def _lock_user(user):
+    """
+    Serialize address mutations for the same user.
+    """
+    user_model = type(user)
+
+    return user_model.objects.select_for_update().get(
+        pk=user.pk
+    )
+
+
+def _get_locked_address(*, address_id, user):
+    """
+    Fetch an address belonging to the user and lock it.
+    """
+    try:
+        return Address.objects.select_for_update().get(
+            pk=address_id,
+            user=user,
+        )
+    except Address.DoesNotExist:
+        raise ValidationError({
+            "address": "Address not found."
+        })
 
 
 @transaction.atomic
 def set_default_address(*, address, user):
     """
-    فقط یک آدرس برای هر کاربر می‌تواند پیش‌فرض باشد.
+    Set one address as the user's default address.
     """
 
-    Address.objects.filter(
+    _lock_user(user)
+
+    locked_address = _get_locked_address(
+        address_id=address.pk,
         user=user,
-        is_default=True,
-    ).exclude(
-        pk=address.pk
-    ).update(
-        is_default=False
     )
 
-    if not address.is_default:
-        address.is_default = True
-        address.save(update_fields=["is_default", "updated_at"])
+    if not locked_address.is_default:
+        Address.objects.filter(
+            user=user,
+            is_default=True,
+        ).exclude(
+            pk=locked_address.pk
+        ).update(
+            is_default=False
+        )
 
-    return address
+        locked_address.is_default = True
+        locked_address.save(
+            update_fields=["is_default", "updated_at"]
+        )
+
+    return locked_address
 
 
 @transaction.atomic
 def create_address(*, user, validated_data):
     """
-    ایجاد آدرس جدید برای کاربر.
+    Create an address for the user.
+    The first address automatically becomes the default address.
     """
 
-    make_default = validated_data.pop("is_default", False)
+    _lock_user(user)
+
+    data = validated_data.copy()
+    make_default = data.pop("is_default", False)
+
+    has_addresses = Address.objects.filter(
+        user=user
+    ).exists()
+
+    if not has_addresses:
+        make_default = True
 
     if make_default:
         Address.objects.filter(
             user=user,
             is_default=True,
-        ).update(is_default=False)
-
-    elif not Address.objects.filter(user=user).exists():
-        # اولین آدرس کاربر را پیش‌فرض می‌کنیم.
-        make_default = True
+        ).update(
+            is_default=False
+        )
 
     return Address.objects.create(
         user=user,
         is_default=make_default,
-        **validated_data,
+        **data,
     )
 
 
 @transaction.atomic
 def update_address(*, address, validated_data):
     """
-    ویرایش آدرس متعلق به کاربر.
+    Update an address and optionally make it the default.
     """
 
-    make_default = validated_data.pop("is_default", address.is_default)
+    user = address.user
+
+    _lock_user(user)
+
+    locked_address = _get_locked_address(
+        address_id=address.pk,
+        user=user,
+    )
+
+    data = validated_data.copy()
+
+    make_default = data.pop(
+        "is_default",
+        locked_address.is_default,
+    )
 
     if make_default:
         Address.objects.filter(
-            user=address.user,
+            user=user,
             is_default=True,
         ).exclude(
-            pk=address.pk
+            pk=locked_address.pk
         ).update(
             is_default=False
         )
 
-    for field, value in validated_data.items():
-        setattr(address, field, value)
+    for field, value in data.items():
+        setattr(locked_address, field, value)
 
-    address.is_default = make_default
-    address.save()
+    locked_address.is_default = make_default
 
-    return address
+    locked_address.save()
+
+    return locked_address
 
 
 @transaction.atomic
 def delete_address(*, address):
     """
-    حذف آدرس.
+    Delete an address.
 
-    اگر آدرس پیش‌فرض حذف شد، آدرس دیگری را پیش‌فرض می‌کنیم.
+    If the deleted address was the default address,
+    the newest remaining address becomes the default.
+
+    Addresses referenced by existing orders cannot be deleted.
     """
 
     user = address.user
-    was_default = address.is_default
 
-    address.delete()
+    _lock_user(user)
+
+    locked_address = _get_locked_address(
+        address_id=address.pk,
+        user=user,
+    )
+
+    was_default = locked_address.is_default
+
+    try:
+        locked_address.delete()
+    except ProtectedError:
+        raise ValidationError({
+            "address": (
+                "This address is used by an existing order "
+                "and cannot be deleted."
+            )
+        })
 
     if was_default:
-        next_address = Address.objects.filter(
-            user=user
-        ).order_by("-created_at").first()
+        next_address = (
+            Address.objects.select_for_update()
+            .filter(user=user)
+            .order_by("-created_at", "-pk")
+            .first()
+        )
 
         if next_address:
             next_address.is_default = True
-            next_address.save(update_fields=["is_default", "updated_at"])
+            next_address.save(
+                update_fields=["is_default", "updated_at"]
+            )
+
+    return True

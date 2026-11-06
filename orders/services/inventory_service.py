@@ -2,6 +2,7 @@
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
+from payments.models import Payment
 
 from orders.models import (
     Order,
@@ -46,18 +47,21 @@ def release_order_inventory(order_id):
     # STEP 2: Check uncertain payments
     # -----------------------------------------------------
 
-    from payments.models import Payment
 
-    has_uncertain_payment = Payment.objects.filter(
-        order=order,
-        status__in=[
+    protected_payment_statuses = [
             Payment.Status.INITIATED,
             Payment.Status.PENDING,
             Payment.Status.UNKNOWN,
-        ],
+            Payment.Status.REVIEW_REQUIRED,
+            Payment.Status.SUCCESS,
+        ]
+
+    has_protected_payment = Payment.objects.filter(
+        order=order,
+        status__in=protected_payment_statuses,
     ).exists()
 
-    if has_uncertain_payment:
+    if has_protected_payment:
         return False
 
     # -----------------------------------------------------

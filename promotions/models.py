@@ -88,6 +88,13 @@ class Coupon(models.Model):
                 condition=Q(expires_at__gt=F("starts_at")),
                 name="coupon_expiry_after_start",
             ),
+            models.CheckConstraint(
+                condition=(
+                    Q(max_discount__isnull=True)
+                    | Q(max_discount__gte=0)
+                ),
+                name="coupon_max_discount_non_negative",
+            ),
         ]
 
     def save(self, *args, **kwargs):

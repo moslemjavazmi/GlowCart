@@ -1,7 +1,6 @@
 import uuid
 
 from django.db import models
-
 from orders.models import Order
 
 
@@ -89,10 +88,6 @@ class Payment(models.Model):
         blank=True,
     )
 
-    # -----------------------------------------------------
-    # Early Callback Handling
-    # -----------------------------------------------------
-
     callback_authority = models.CharField(
         max_length=255,
         null=True,
@@ -109,8 +104,6 @@ class Payment(models.Model):
         null=True,
         blank=True,
     )
-
-    # -----------------------------------------------------
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -141,11 +134,9 @@ class Payment(models.Model):
                         "initiated",
                         "pending",
                         "unknown",
+                        "review_required",
                     ]
                 ),
                 name="one_active_payment_per_order",
             ),
         ]
-
-    def __str__(self):
-        return f"{self.order.order_number} - {self.status}"

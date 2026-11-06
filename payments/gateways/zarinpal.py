@@ -189,8 +189,18 @@ class ZarinpalGateway(PaymentGateway):
             ) from exc
 
         if code != 100:
-            raise ZarinpalRejectedError(
-                f"Zarinpal request rejected with code: {code}"
+
+            # فقط کدهای خطای شناخته‌شده و قطعی
+            # باید به عنوان Rejected شناخته شوند.
+
+            if code < 0:
+                raise ZarinpalRejectedError(
+                    f"Zarinpal request rejected with code: {code}"
+                )
+
+            # کد ناشناخته را نباید رد قطعی فرض کنیم.
+            raise ZarinpalResponseError(
+                f"Unknown Zarinpal request code: {code}"
             )
 
         authority = data.get("authority")

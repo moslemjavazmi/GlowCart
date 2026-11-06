@@ -1,6 +1,6 @@
 
 from decimal import Decimal, ROUND_HALF_UP
-
+from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
 
@@ -18,6 +18,10 @@ ACTIVE_OR_CONSUMED = [
 ]
 
 
+# =========================================================
+# MONEY
+# =========================================================
+
 def calculate_coupon_discount(coupon, amount):
     """
     Calculate the discount without exceeding the eligible amount.
@@ -31,6 +35,7 @@ def calculate_coupon_discount(coupon, amount):
         })
 
     if coupon.discount_type == Coupon.DiscountType.PERCENTAGE:
+
         discount = (
             amount * coupon.value / Decimal("100")
         )
@@ -39,6 +44,7 @@ def calculate_coupon_discount(coupon, amount):
             discount = min(discount, coupon.max_discount)
 
     elif coupon.discount_type == Coupon.DiscountType.FIXED:
+
         discount = coupon.value
 
     else:
@@ -54,12 +60,63 @@ def calculate_coupon_discount(coupon, amount):
     )
 
 
-def validate_coupon(coupon, *, user, amount):
-    """
-    Validate time, status, minimum order amount and usage limits.
+# =========================================================
+# ORDER VALIDATION
+# =========================================================
 
-    This function assumes the Coupon row is already locked
-    when used inside the reservation transaction.
+def get_editable_order(*, user, order_id):
+    """
+    Retrieve and lock an order that can still be modified.
+    """
+
+    order = (
+        Order.objects
+        .select_for_update()
+        .filter(
+            id=order_id,
+            user=user,
+        )
+        .first()
+    )
+
+    if not order:
+        raise ValidationError({
+            "order": "Order not found."
+        })
+
+    if order.status != Order.Status.AWAITING_PAYMENT:
+        raise ValidationError({
+            "order": "This order cannot be modified."
+        })
+
+    if order.inventory_released_at is not None:
+        raise ValidationError({
+            "order": "Inventory has already been released."
+        })
+
+    if order.expires_at and order.expires_at <= timezone.now():
+        raise ValidationError({
+            "order": "This order has expired."
+        })
+
+    return order
+
+
+# =========================================================
+# COUPON VALIDATION
+# =========================================================
+
+def validate_coupon(
+    coupon,
+    *,
+    user,
+    amount,
+    exclude_reservation_id=None,
+):
+    """
+    Validate coupon availability and usage limits.
+
+    The Coupon row must already be locked by the caller.
     """
 
     now = timezone.now()
@@ -89,11 +146,33 @@ def validate_coupon(coupon, *, user, amount):
             )
         })
 
-    # Count consumed reservations and currently active reservations.
-    usage_count = CouponReservation.objects.filter(
+    # Count active and consumed reservations.
+    usage_queryset = CouponReservation.objects.filter(
         coupon=coupon,
-        status__in=ACTIVE_OR_CONSUMED,
-    ).count()
+    ).filter(
+        Q(status=CouponReservation.Status.CONSUMED)
+        | Q(
+            status=CouponReservation.Status.ACTIVE,
+            expires_at__gt=now,
+        )
+    )
+    user_usage_queryset = usage_queryset.filter(
+        user=user,
+    )
+
+    # Exclude the current reservation when revalidating
+    # an already reserved coupon for the same order.
+    if exclude_reservation_id is not None:
+
+        usage_queryset = usage_queryset.exclude(
+            id=exclude_reservation_id
+        )
+
+        user_usage_queryset = user_usage_queryset.exclude(
+            id=exclude_reservation_id
+        )
+
+    usage_count = usage_queryset.count()
 
     if (
         coupon.usage_limit is not None
@@ -103,22 +182,28 @@ def validate_coupon(coupon, *, user, amount):
             "coupon": "This coupon has reached its usage limit."
         })
 
-    user_usage_count = CouponReservation.objects.filter(
-        coupon=coupon,
-        user=user,
-        status__in=ACTIVE_OR_CONSUMED,
-    ).count()
+    user_usage_count = user_usage_queryset.count()
 
     if (
         coupon.usage_limit_per_user is not None
         and user_usage_count >= coupon.usage_limit_per_user
     ):
         raise ValidationError({
-            "coupon": "You have already used this coupon the maximum number of times."
+            "coupon": (
+                "You have already used this coupon "
+                "the maximum number of times."
+            )
         })
 
-    return calculate_coupon_discount(coupon, amount)
+    return calculate_coupon_discount(
+        coupon,
+        amount,
+    )
 
+
+# =========================================================
+# RESERVE COUPON
+# =========================================================
 
 @transaction.atomic
 def reserve_coupon(
@@ -131,38 +216,18 @@ def reserve_coupon(
     """
     Validate a coupon and reserve one usage for an order.
 
-    The coupon row is locked to serialize concurrent reservations
+    Locking the Coupon row serializes concurrent reservations
     for the same coupon.
     """
 
-    order = (
-        Order.objects
-        .select_for_update()
-        .filter(
-            id=order_id,
-            user=user,
-        )
-        .first()
+    order = get_editable_order(
+        user=user,
+        order_id=order_id,
     )
 
-    if not order:
+    if not order.expires_at:
         raise ValidationError({
-            "order": "Order not found."
-        })
-
-    if order.status != Order.Status.AWAITING_PAYMENT:
-        raise ValidationError({
-            "order": "This order is not awaiting payment."
-        })
-
-    if order.inventory_released_at is not None:
-        raise ValidationError({
-            "order": "Inventory for this order has already been released."
-        })
-
-    if order.expires_at and order.expires_at <= timezone.now():
-        raise ValidationError({
-            "order": "This order has expired."
+            "order": "Order expiration time is required."
         })
 
     normalized_code = code.strip().upper()
@@ -179,44 +244,49 @@ def reserve_coupon(
             "code": "Invalid coupon code."
         })
 
-    # An order can have only one coupon reservation.
+    # Lock existing reservation if present.
     existing = (
         CouponReservation.objects
+        .select_for_update()
         .filter(order=order)
         .first()
     )
 
     if existing:
-        if existing.status == CouponReservation.Status.ACTIVE:
-            if existing.coupon_id == coupon.id:
-                return existing
-
-            raise ValidationError({
-                "coupon": "This order already has an active coupon."
-            })
 
         if existing.status == CouponReservation.Status.CONSUMED:
             raise ValidationError({
-                "coupon": "A coupon has already been consumed for this order."
+                "coupon": (
+                    "A coupon has already been consumed "
+                    "for this order."
+                )
             })
 
-        # A released reservation can be reused for the same order.
-        # The old reservation is reactivated after fresh validation.
+        if (
+            existing.status == CouponReservation.Status.ACTIVE
+            and existing.coupon_id != coupon.id
+        ):
+            raise ValidationError({
+                "coupon": (
+                    "This order already has an active coupon. "
+                    "Remove it before applying another coupon."
+                )
+            })
 
     discount = validate_coupon(
         coupon,
         user=user,
         amount=discountable_amount,
+        exclude_reservation_id=(
+            existing.id if existing else None
+        ),
     )
 
     reservation_expiry = order.expires_at
 
-    if reservation_expiry is None:
-        raise ValidationError({
-            "order": "Order expiration time is required."
-        })
-
+    # Reactivate or update an existing reservation.
     if existing:
+
         existing.coupon = coupon
         existing.user = user
         existing.discount_amount = discount
@@ -239,6 +309,7 @@ def reserve_coupon(
 
         return existing
 
+    # Create a new reservation.
     return CouponReservation.objects.create(
         coupon=coupon,
         order=order,
@@ -249,10 +320,14 @@ def reserve_coupon(
     )
 
 
+# =========================================================
+# CONSUME COUPON
+# =========================================================
+
 @transaction.atomic
 def consume_coupon_reservation(*, order_id):
     """
-    Mark the active coupon reservation as consumed
+    Consume an active coupon reservation
     after successful payment.
     """
 
@@ -282,11 +357,15 @@ def consume_coupon_reservation(*, order_id):
     return True
 
 
+# =========================================================
+# RELEASE COUPON
+# =========================================================
+
 @transaction.atomic
 def release_coupon_reservation(*, order_id):
     """
-    Release an active coupon reservation when an order
-    is cancelled or expires.
+    Release an active coupon reservation
+    when an order expires or is cancelled.
     """
 
     reservation = (
@@ -315,41 +394,23 @@ def release_coupon_reservation(*, order_id):
     return True
 
 
+# =========================================================
+# APPLY COUPON TO ORDER
+# =========================================================
 
 @transaction.atomic
 def apply_coupon_to_order(*, code, user, order_id):
+    """
+    Apply a coupon to an existing editable order.
+    """
 
-    order = (
-        Order.objects
-        .select_for_update()
-        .filter(
-            id=order_id,
-            user=user,
-        )
-        .first()
+    order = get_editable_order(
+        user=user,
+        order_id=order_id,
     )
 
-    if not order:
-        raise ValidationError({
-            "order": "Order not found."
-        })
-
-    if order.status != Order.Status.AWAITING_PAYMENT:
-        raise ValidationError({
-            "order": "Coupon cannot be changed for this order."
-        })
-
-    if order.inventory_released_at is not None:
-        raise ValidationError({
-            "order": "Inventory has already been released."
-        })
-
-    if order.expires_at and order.expires_at <= timezone.now():
-        raise ValidationError({
-            "order": "Order has expired."
-        })
-
-    # Coupon is calculated against subtotal, not shipping.
+    # Coupon discount is calculated against subtotal,
+    # excluding shipping cost.
     reservation = reserve_coupon(
         code=code,
         user=user,
@@ -357,13 +418,21 @@ def apply_coupon_to_order(*, code, user, order_id):
         discountable_amount=order.subtotal,
     )
 
-    order.discount_amount = reservation.discount_amount
+    discount_amount = reservation.discount_amount
 
-    order.total_amount = (
+    total_amount = (
         order.subtotal
         + order.shipping_cost
-        - order.discount_amount
+        - discount_amount
     )
+
+    if total_amount <= Decimal("0.00"):
+        raise ValidationError({
+            "coupon": "Invalid final order amount."
+        })
+
+    order.discount_amount = discount_amount
+    order.total_amount = total_amount
 
     order.save(
         update_fields=[
@@ -376,28 +445,20 @@ def apply_coupon_to_order(*, code, user, order_id):
     return order
 
 
+# =========================================================
+# REMOVE COUPON FROM ORDER
+# =========================================================
+
 @transaction.atomic
 def remove_coupon_from_order(*, user, order_id):
+    """
+    Remove an active coupon and restore the original total.
+    """
 
-    order = (
-        Order.objects
-        .select_for_update()
-        .filter(
-            id=order_id,
-            user=user,
-        )
-        .first()
+    order = get_editable_order(
+        user=user,
+        order_id=order_id,
     )
-
-    if not order:
-        raise ValidationError({
-            "order": "Order not found."
-        })
-
-    if order.status != Order.Status.AWAITING_PAYMENT:
-        raise ValidationError({
-            "order": "Coupon cannot be removed from this order."
-        })
 
     reservation = (
         CouponReservation.objects
@@ -410,6 +471,7 @@ def remove_coupon_from_order(*, user, order_id):
     )
 
     if reservation:
+
         reservation.status = CouponReservation.Status.RELEASED
         reservation.released_at = timezone.now()
 

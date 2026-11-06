@@ -1,48 +1,62 @@
-from django.contrib.auth import get_user_model
+
+import logging
+from urllib.parse import urlencode
+
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.core.mail import send_mail
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.throttling import ScopedRateThrottle
 
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework.permissions import IsAuthenticated
-from accounts.models import EmailVerification
+
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+
 from accounts.serializers import (
     RegisterSerializer,
     VerifyEmailSerializer,
+    ResendVerificationSerializer,
+    LoginSerializer,
     ProfileSerializer,
     ChangePasswordSerializer,
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
 )
+
 from accounts.services.email_verification import (
     create_email_verification,
     verify_email_code,
+    EmailVerificationError,
+    EmailDeliveryError,
 )
-from django.contrib.auth.tokens import default_token_generator
-from rest_framework.permissions import AllowAny
-from django.core.mail import send_mail
-from django.utils.encoding import force_bytes
-from django.utils.http import urlsafe_base64_encode
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
 
-
-from rest_framework.generics import ListAPIView
-
-from accounts.models import User
 from accounts.permissions.roles import IsAdminRole
+
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
 
 class RegisterView(generics.CreateAPIView):
+
     serializer_class = RegisterSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "register"
 
     def create(self, request, *args, **kwargs):
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -50,24 +64,38 @@ class RegisterView(generics.CreateAPIView):
 
         try:
             create_email_verification(user)
-        except Exception:
-            # Do not leave a partially registered account behind
-            user.delete()
-            raise
+
+            message = (
+                "Registration successful. "
+                "Check your email for the verification code."
+            )
+
+        except EmailDeliveryError:
+            logger.exception(
+                "Verification email delivery failed for user %s",
+                user.pk,
+            )
+
+            message = (
+                "Account created successfully, but the verification "
+                "email could not be delivered. Please request a new code."
+            )
 
         return Response(
             {
-                "message": (
-                    "Registration successful. "
-                    "Check your email for the verification code."
-                ),
+                "message": message,
                 "email": user.email,
             },
             status=status.HTTP_201_CREATED,
         )
 
+
 class VerifyEmailView(APIView):
-    permission_classes = [permissions.AllowAny]
+
+    permission_classes = [AllowAny]
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "verify_email"
 
     @swagger_auto_schema(
         operation_description="Verify user email using the 6-digit code.",
@@ -78,21 +106,22 @@ class VerifyEmailView(APIView):
                 "email": openapi.Schema(
                     type=openapi.TYPE_STRING,
                     format=openapi.FORMAT_EMAIL,
-                    example="moslem@example.com",
+                    example="user@example.com",
                 ),
                 "code": openapi.Schema(
                     type=openapi.TYPE_STRING,
                     example="029158",
-                    description="6-digit verification code",
                 ),
             },
         ),
         responses={
             200: "Email verified successfully.",
             400: "Invalid or expired verification code.",
+            429: "Too many requests.",
         },
     )
     def post(self, request):
+
         serializer = VerifyEmailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -110,8 +139,62 @@ class VerifyEmailView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
+class ResendVerificationView(APIView):
+
+    permission_classes = [AllowAny]
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "resend_verification"
+
+    def post(self, request):
+
+        serializer = ResendVerificationSerializer(
+            data=request.data
+        )
+
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data["email"]
+
+        user = User.objects.filter(
+            email__iexact=email,
+            is_active=True,
+            is_email_verified=False,
+        ).first()
+
+        if user:
+            try:
+                create_email_verification(user)
+
+            except EmailVerificationError:
+                # Do not reveal cooldown or account state.
+                pass
+
+            except EmailDeliveryError:
+                logger.exception(
+                    "Verification email resend failed for user %s",
+                    user.pk,
+                )
+
+        return Response(
+            {
+                "message": (
+                    "If an eligible unverified account exists, "
+                    "a verification email will be sent."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class LoginView(APIView):
-    permission_classes = [permissions.AllowAny]
+
+    permission_classes = [AllowAny]
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
     @swagger_auto_schema(
         operation_description="Login with email and password.",
         request_body=openapi.Schema(
@@ -121,51 +204,30 @@ class LoginView(APIView):
                 "email": openapi.Schema(
                     type=openapi.TYPE_STRING,
                     format=openapi.FORMAT_EMAIL,
-                    example="karbar@example.com",
+                    example="user@example.com",
                 ),
                 "password": openapi.Schema(
                     type=openapi.TYPE_STRING,
                     format=openapi.FORMAT_PASSWORD,
-                    example="StrongPass123!",
                 ),
             },
         ),
         responses={
-            200: "Login successful. Returns access & refresh tokens.",
-            400: "Email or password missing.",
-            401: "Invalid email or password.",
-            403: "Inactive or unverified account.",
+            200: "Login successful.",
+            400: "Invalid input or credentials.",
+            429: "Too many requests.",
         },
     )
     def post(self, request):
-        email = request.data.get("email", "").strip().lower()
-        password = request.data.get("password", "")
 
-        if not email or not password:
-            return Response(
-                {"detail": "Email and password are required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        serializer = LoginSerializer(
+            data=request.data,
+            context={"request": request},
+        )
 
-        user = User.objects.filter(email__iexact=email).first()
+        serializer.is_valid(raise_exception=True)
 
-        if user is None or not user.check_password(password):
-            return Response(
-                {"detail": "Invalid email or password."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
-        if not user.is_active:
-            return Response(
-                {"detail": "This account is inactive."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        if not user.is_email_verified:
-            return Response(
-                {"detail": "Please verify your email first."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        user = serializer.validated_data["user"]
 
         refresh = RefreshToken.for_user(user)
 
@@ -185,6 +247,7 @@ class LoginView(APIView):
 
 
 class MeView(generics.RetrieveUpdateAPIView):
+
     serializer_class = ProfileSerializer
     permission_classes = [IsAuthenticated]
 
@@ -193,9 +256,11 @@ class MeView(generics.RetrieveUpdateAPIView):
 
 
 class LogoutView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
+
         refresh_token = request.data.get("refresh")
 
         if not refresh_token:
@@ -228,9 +293,11 @@ class LogoutView(APIView):
 
 
 class ChangePasswordView(APIView):
+
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+
         serializer = ChangePasswordSerializer(
             data=request.data,
             context={"request": request},
@@ -240,15 +307,25 @@ class ChangePasswordView(APIView):
         serializer.save()
 
         return Response(
-            {"message": "Password changed successfully."},
+            {
+                "message": (
+                    "Password changed successfully. "
+                    "Please log in again."
+                )
+            },
             status=status.HTTP_200_OK,
         )
 
 
 class ForgotPasswordView(APIView):
+
     permission_classes = [AllowAny]
 
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "forgot_password"
+
     def post(self, request):
+
         serializer = ForgotPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -261,25 +338,41 @@ class ForgotPasswordView(APIView):
         ).first()
 
         if user:
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+            uid = urlsafe_base64_encode(
+                force_bytes(user.pk)
+            )
+
             token = default_token_generator.make_token(user)
 
+            query_string = urlencode({
+                "uid": uid,
+                "token": token,
+            })
+
             reset_url = (
-                f"http://localhost:3000/reset-password/"
-                f"?uid={uid}&token={token}"
+                f"{settings.FRONTEND_PASSWORD_RESET_URL}"
+                f"?{query_string}"
             )
 
-            send_mail(
-                subject="GlowCart - Reset your password",
-                message=(
-                    "Use this link to reset your password:\n"
-                    f"{reset_url}\n\n"
-                    "If you did not request this, ignore this email."
-                ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[user.email],
-                fail_silently=False,
-            )
+            try:
+                send_mail(
+                    subject="GlowCart - Reset your password",
+                    message=(
+                        "Use this link to reset your password:\n"
+                        f"{reset_url}\n\n"
+                        "If you did not request this, ignore this email."
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+
+            except Exception:
+                logger.exception(
+                    "Password reset email delivery failed for user %s",
+                    user.pk,
+                )
 
         return Response(
             {
@@ -293,22 +386,32 @@ class ForgotPasswordView(APIView):
 
 
 class ResetPasswordView(APIView):
-    permission_classes = [AllowAny]
 
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "reset_password"
+    
     def post(self, request):
+
         serializer = ResetPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
         return Response(
-            {"message": "Password reset successfully."},
+            {
+                "message": (
+                    "Password reset successfully. "
+                    "Please log in again."
+                )
+            },
             status=status.HTTP_200_OK,
         )
 
 
+class AdminUserListView(generics.ListAPIView):
 
-class AdminUserListView(ListAPIView):
     queryset = User.objects.all().order_by("-date_joined")
+
     serializer_class = ProfileSerializer
 
     permission_classes = [

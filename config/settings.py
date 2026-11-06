@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "orders",
     "payments",
     "promotions",
+    "corsheaders",
 ]
 
 
@@ -66,6 +67,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -133,26 +135,42 @@ AUTH_PASSWORD_VALIDATORS = [
 # Django REST Framework
 # --------------------------------------------------
 
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
+
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny",
     ],
+
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
+
     "DEFAULT_PAGINATION_CLASS": (
         "rest_framework.pagination.PageNumberPagination"
     ),
+
     "PAGE_SIZE": 12,
+
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
     ],
+
+    "DEFAULT_THROTTLE_RATES": {
+        "login": "5/min",
+        "register": "5/hour",
+        "verify_email": "10/hour",
+        "resend_verification": "5/hour",
+        "forgot_password": "5/hour",
+        "reset_password": "5/hour",
+    },
 }
+
 
 
 # --------------------------------------------------
@@ -221,7 +239,6 @@ SWAGGER_SETTINGS = {
     "USE_SESSION_AUTH": False,
 }
 
-
 # --------------------------------------------------
 # Payment - General
 # --------------------------------------------------
@@ -240,19 +257,37 @@ ZARINPAL_CURRENCY = os.getenv(
     "IRT",
 )
 
+# Base callback URL.
+# payment_id will be appended by payment_service.py
 PAYMENT_CALLBACK_URL = os.getenv(
     "PAYMENT_CALLBACK_URL",
-    "http://localhost:8000/api/payments/callback/zarinpal/",
+    "http://127.0.0.1:8000/api/payments/callback/zarinpal/",
 )
 
 FRONTEND_PAYMENT_RESULT_URL = os.getenv(
     "FRONTEND_PAYMENT_RESULT_URL",
     "http://localhost:3000/payment/result",
 )
+FRONTEND_PASSWORD_RESET_URL = os.getenv(
+    "FRONTEND_PASSWORD_RESET_URL",
+    "http://localhost:3000/reset-password",
+)
 
+# Payments that remain INITIATED longer than this
+# will be considered stale and sent for reconciliation.
+PAYMENT_INITIATED_STALE_AFTER_SECONDS = int(
+    os.getenv(
+        "PAYMENT_INITIATED_STALE_AFTER_SECONDS",
+        "300",
+    )
+)
 
 # --------------------------------------------------
 # Default
 # --------------------------------------------------
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
