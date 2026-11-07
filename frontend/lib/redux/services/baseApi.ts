@@ -14,6 +14,7 @@ import {
   setAccessToken,
 } from "../features/auth/authSlice";
 import { authStorage } from "../features/auth/authStorage";
+import { cartStorage } from "./cartStorage";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
@@ -25,6 +26,12 @@ const rawBaseQuery = fetchBaseQuery({
 
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
+    }
+
+    const guestCartToken = cartStorage.getGuestToken();
+
+    if (guestCartToken) {
+      headers.set("X-Guest-Cart-Token", guestCartToken);
     }
 
     headers.set("Accept", "application/json");

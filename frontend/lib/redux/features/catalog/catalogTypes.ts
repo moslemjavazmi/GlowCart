@@ -1,4 +1,3 @@
-
 export interface CatalogCategory {
   id: number;
   name: string;
@@ -19,15 +18,28 @@ export interface ProductVariant {
   stock: number;
 }
 
+export interface ProductImage {
+  id: number;
+  image: string;
+  alt_text: string;
+  is_primary: boolean;
+  sort_order: number;
+}
+
 export interface Product {
   id: number;
   name: string;
   slug: string;
   description: string;
+
   category: CatalogCategory;
   brand: CatalogBrand | null;
+
   variants: ProductVariant[];
+  images: ProductImage[];
+
   created_at: string;
+  updated_at: string;
 }
 
 export interface PaginatedResponse<T> {
@@ -40,8 +52,15 @@ export interface PaginatedResponse<T> {
 export interface GetProductsParams {
   page?: number;
   page_size?: number;
+
   category?: string;
   brand?: string;
   search?: string;
+
   in_stock?: boolean;
+
+  min_price?: number;
+  max_price?: number;
+
+  ordering?: string;
 }

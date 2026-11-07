@@ -1,7 +1,8 @@
-
 import { baseApi } from "@/lib/redux/services/baseApi";
 
 import type {
+  CatalogBrand,
+  CatalogCategory,
   GetProductsParams,
   PaginatedResponse,
   Product,
@@ -26,10 +27,32 @@ export const catalogApi = baseApi.injectEndpoints({
         method: "GET",
       }),
     }),
+
+    getCategories: builder.query<
+        PaginatedResponse<CatalogCategory>,
+        void
+        >({
+        query: () => ({
+            url: "/catalog/categories/",
+            method: "GET",
+        }),
+        }),
+
+    getBrands: builder.query<
+        PaginatedResponse<CatalogBrand>,
+        void
+        >({
+        query: () => ({
+            url: "/catalog/brands/",
+            method: "GET",
+        }),
+    }),
   }),
 });
 
 export const {
   useGetProductsQuery,
   useGetProductBySlugQuery,
+  useGetCategoriesQuery,
+  useGetBrandsQuery,
 } = catalogApi;
