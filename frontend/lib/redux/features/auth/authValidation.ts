@@ -24,7 +24,34 @@ export const verifyEmailSchema = z.object({
     .string()
     .regex(/^\d{6}$/, "کد تأیید باید دقیقاً ۶ رقم باشد."),
 });
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().email("ایمیل معتبر وارد کنید."),
+});
 
+export const resetPasswordSchema = z
+  .object({
+    new_password: z
+      .string()
+      .min(8, "رمز عبور باید حداقل ۸ کاراکتر باشد."),
+    password_confirm: z
+      .string()
+      .min(1, "تکرار رمز عبور الزامی است."),
+  })
+  .refine(
+    (data) => data.new_password === data.password_confirm,
+    {
+      message: "رمزهای عبور یکسان نیستند.",
+      path: ["password_confirm"],
+    },
+  );
+
+export type ForgotPasswordFormValues = z.infer<
+  typeof forgotPasswordSchema
+>;
+
+export type ResetPasswordFormValues = z.infer<
+  typeof resetPasswordSchema
+>;
 export type LoginFormValues = z.infer<typeof loginSchema>;
 export type RegisterFormValues = z.infer<typeof registerSchema>;
 export type VerifyEmailFormValues = z.infer<typeof verifyEmailSchema>;

@@ -84,9 +84,7 @@ export default function LoginForm() {
           />
 
           {errors.email && (
-            <p className="mt-1 text-sm text-red-600">
-              {errors.email.message}
-            </p>
+            <p className="mt-1 text-sm text-red-600">{errors.email.message}</p>
           )}
         </div>
 
@@ -132,6 +130,12 @@ export default function LoginForm() {
           ثبت‌نام کنید
         </Link>
       </p>
+      <Link
+        href="/forgot-password"
+        className="text-sm text-gray-600 underline underline-offset-4"
+      >
+        رمز عبور را فراموش کرده‌اید؟
+      </Link>
     </div>
   );
 }

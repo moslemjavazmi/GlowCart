@@ -7,6 +7,9 @@ import type {
   RegisterResponse,
   VerifyEmailRequest,
   RefreshResponse,
+  ForgotPasswordRequest,
+  ResetPasswordRequest,
+  AuthMessageResponse,
 } from "../features/auth/authTypes";
 
 export const authApi = baseApi.injectEndpoints({
@@ -81,6 +84,27 @@ export const authApi = baseApi.injectEndpoints({
       }),
       providesTags: ["User"],
     }),
+    forgotPassword: builder.mutation<
+      AuthMessageResponse,
+      ForgotPasswordRequest
+    >({
+      query: (body) => ({
+        url: "/auth/forgot-password/",
+        method: "POST",
+        body,
+      }),
+    }),
+
+    resetPassword: builder.mutation<
+      AuthMessageResponse,
+      ResetPasswordRequest
+    >({
+      query: (body) => ({
+        url: "/auth/reset-password/",
+        method: "POST",
+        body,
+      }),
+    }),
   }),
 });
 
@@ -92,4 +116,6 @@ export const {
   useRefreshTokenMutation,
   useLogoutMutation,
   useGetMeQuery,
+  useForgotPasswordMutation,
+  useResetPasswordMutation,
 } = authApi;

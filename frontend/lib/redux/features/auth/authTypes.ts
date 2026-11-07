@@ -45,3 +45,18 @@ export interface RefreshResponse {
   access: string;
   refresh?: string;
 }
+
+export interface ForgotPasswordRequest {
+  email: string;
+}
+
+export interface ResetPasswordRequest {
+  uid: string;
+  token: string;
+  new_password: string;
+  password_confirm: string;
+}
+
+export interface AuthMessageResponse {
+  message: string;
+}
