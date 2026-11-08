@@ -29,23 +29,23 @@ export const catalogApi = baseApi.injectEndpoints({
     }),
 
     getCategories: builder.query<
-        PaginatedResponse<CatalogCategory>,
-        void
-        >({
-        query: () => ({
-            url: "/catalog/categories/",
-            method: "GET",
-        }),
-        }),
+      PaginatedResponse<CatalogCategory>,
+      void
+    >({
+      query: () => ({
+        url: "/catalog/categories/",
+        method: "GET",
+      }),
+    }),
 
     getBrands: builder.query<
-        PaginatedResponse<CatalogBrand>,
-        void
-        >({
-        query: () => ({
-            url: "/catalog/brands/",
-            method: "GET",
-        }),
+      PaginatedResponse<CatalogBrand>,
+      void
+    >({
+      query: () => ({
+        url: "/catalog/brands/",
+        method: "GET",
+      }),
     }),
   }),
 });

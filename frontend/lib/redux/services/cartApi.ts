@@ -20,10 +20,22 @@ function syncGuestToken(
   data: Cart,
   dispatch: AppDispatch
 ): void {
-  if (!data.guest_token) return;
+  console.log("[Cart] syncGuestToken executed");
+  console.log("[Cart] Received data:", data);
+  console.log("[Cart] Guest token:", data.guest_token);
+
+  if (!data.guest_token) {
+    console.warn("[Cart] Guest token is missing");
+    return;
+  }
 
   cartStorage.setGuestToken(data.guest_token);
   dispatch(setGuestToken(data.guest_token));
+
+  console.log(
+    "[Cart] Saved token:",
+    localStorage.getItem("glowcart_guest_cart_token")
+  );
 }
 
 export const cartApi = baseApi.injectEndpoints({
@@ -41,9 +53,9 @@ export const cartApi = baseApi.injectEndpoints({
         try {
           const { data } = await queryFulfilled;
 
-          await syncGuestToken(data, dispatch);
+          syncGuestToken(data, dispatch);
         } catch {
-          // خطا توسط RTK Query مدیریت می‌شود.
+          // console.error("[Cart] getCart failed:", error);
         }
       },
     }),

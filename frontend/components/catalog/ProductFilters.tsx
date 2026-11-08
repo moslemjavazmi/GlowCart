@@ -2,25 +2,25 @@
 
 import { useEffect, useState } from "react";
 
-import {
-  useGetBrandsQuery,
-  useGetCategoriesQuery,
-} from "@/lib/redux/services/catalogApi";
+import type {
+  CatalogCategory,
+  CatalogBrand
+} from "@/lib/redux/features/catalog/catalogTypes";
 
 import { useProductFilters } from "@/lib/redux/features/catalog/useProductFilters";
+import { useGetBrandsQuery, useGetCategoriesQuery } from "@/lib/redux/services/catalogApi";
 
 export default function ProductFilters() {
-  const {
-    filters,
-    updateFilters,
-    clearFilters,
-  } = useProductFilters();
+  const { filters, updateFilters, clearFilters } = useProductFilters();
 
-  const { data: categories = [], isLoading: categoriesLoading } =
+  const { data: categoriesData, isLoading: categoriesLoading } =
     useGetCategoriesQuery();
 
-  const { data: brands = [], isLoading: brandsLoading } =
-    useGetBrandsQuery();
+  const { data: brandsData, isLoading: brandsLoading } = useGetBrandsQuery();
+
+  const categories: CatalogCategory[] = categoriesData?.results ?? [];
+
+  const brands: CatalogBrand[] = brandsData?.results ?? [];
 
   const [search, setSearch] = useState(filters.q);
   const [minPrice, setMinPrice] = useState(filters.min_price);
@@ -36,16 +36,14 @@ export default function ProductFilters() {
     void updateFilters({
       q: search.trim(),
       min_price: minPrice.trim(),
-      max_price: maxPrice.trim(),
+      max_price: maxPrice.trim()
     });
   };
 
   return (
     <aside className="rounded-2xl border border-gray-100 bg-white p-5">
       <div className="mb-6 flex items-center justify-between">
-        <h2 className="text-lg font-bold text-gray-900">
-          فیلتر محصولات
-        </h2>
+        <h2 className="text-lg font-bold text-gray-900">فیلتر محصولات</h2>
 
         <button
           type="button"
@@ -94,21 +92,16 @@ export default function ProductFilters() {
           value={filters.category}
           onChange={(event) =>
             void updateFilters({
-              category: event.target.value,
+              category: event.target.value
             })
           }
           disabled={categoriesLoading}
           className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-pink-500"
         >
-          <option value="">
-            همه دسته‌بندی‌ها
-          </option>
+          <option value="">همه دسته‌بندی‌ها</option>
 
           {categories.map((category) => (
-            <option
-              key={category.id}
-              value={category.slug}
-            >
+            <option key={category.id} value={category.slug}>
               {category.name}
             </option>
           ))}
@@ -129,21 +122,16 @@ export default function ProductFilters() {
           value={filters.brand}
           onChange={(event) =>
             void updateFilters({
-              brand: event.target.value,
+              brand: event.target.value
             })
           }
           disabled={brandsLoading}
           className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-pink-500"
         >
-          <option value="">
-            همه برندها
-          </option>
+          <option value="">همه برندها</option>
 
           {brands.map((brand) => (
-            <option
-              key={brand.id}
-              value={brand.slug}
-            >
+            <option key={brand.id} value={brand.slug}>
               {brand.name}
             </option>
           ))}
@@ -164,7 +152,7 @@ export default function ProductFilters() {
           value={filters.in_stock}
           onChange={(event) =>
             void updateFilters({
-              in_stock: event.target.value,
+              in_stock: event.target.value
             })
           }
           className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-pink-500"
@@ -177,9 +165,7 @@ export default function ProductFilters() {
 
       {/* Price range */}
       <div className="mb-6">
-        <h3 className="mb-3 text-sm font-medium text-gray-700">
-          محدوده قیمت
-        </h3>
+        <h3 className="mb-3 text-sm font-medium text-gray-700">محدوده قیمت</h3>
 
         <div className="space-y-3">
           <input
@@ -216,7 +202,7 @@ export default function ProductFilters() {
           value={filters.ordering}
           onChange={(event) =>
             void updateFilters({
-              ordering: event.target.value,
+              ordering: event.target.value
             })
           }
           className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-pink-500"
