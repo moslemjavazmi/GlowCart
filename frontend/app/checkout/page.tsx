@@ -1,0 +1,731 @@
+
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+
+import { useAppSelector } from "@/lib/redux/hooks";
+
+import { useGetCartQuery } from "@/lib/redux/services/cartApi";
+
+import {
+  useGetAddressesQuery,
+  useCreateAddressMutation,
+  useUpdateAddressMutation,
+  useDeleteAddressMutation,
+} from "@/lib/redux/services/addressApi";
+
+import { useCreateOrderMutation } from "@/lib/redux/services/orderApi";
+
+import {
+  useInitializePaymentMutation,
+  useGetPaymentQuery,
+} from "@/lib/redux/services/paymentApi";
+
+import type { Cart } from "@/lib/redux/features/cart/cartTypes";
+import type {
+  Address,
+  AddressPayload,
+} from "@/lib/redux/features/addresses/addressTypes";
+import type { Order } from "@/lib/redux/features/orders/orderTypes";
+
+import AddressForm from "@/components/checkout/AddressForm";
+import AddressSelector from "@/components/checkout/AddressSelector";
+import CheckoutSummary from "@/components/checkout/CheckoutSummary";
+
+function getErrorMessage(error: unknown): string {
+  const apiError = error as {
+    data?: {
+      detail?: string;
+      error?: string;
+      [key: string]: unknown;
+    };
+    message?: string;
+  };
+
+  const data = apiError.data;
+
+  if (typeof data?.detail === "string") {
+    return data.detail;
+  }
+
+  if (typeof data?.error === "string") {
+    return data.error;
+  }
+
+  if (data) {
+    const firstFieldError = Object.values(data).find(
+      (value) =>
+        Array.isArray(value) &&
+        typeof value[0] === "string"
+    );
+
+    if (
+      Array.isArray(firstFieldError) &&
+      typeof firstFieldError[0] === "string"
+    ) {
+      return firstFieldError[0];
+    }
+  }
+
+  return (
+    apiError.message ||
+    "عملیات انجام نشد. لطفاً دوباره تلاش کنید."
+  );
+}
+
+export default function CheckoutPage() {
+  const router = useRouter();
+
+  const isAuthenticated = useAppSelector(
+    (state) => state.auth.isAuthenticated
+  );
+
+  // --------------------------------------------------
+  // Local state
+  // --------------------------------------------------
+
+  const [selectedAddressId, setSelectedAddressId] =
+    useState<string | null>(null);
+
+  const [showAddressForm, setShowAddressForm] =
+    useState(false);
+
+  const [editingAddress, setEditingAddress] =
+    useState<Address | null>(null);
+
+  const [couponCode, setCouponCode] = useState("");
+
+  const [message, setMessage] = useState("");
+
+  const [pendingOrder, setPendingOrder] =
+    useState<Order | null>(null);
+
+  const [pendingPaymentId, setPendingPaymentId] =
+    useState<string | null>(null);
+
+  const [cartSnapshot, setCartSnapshot] =
+    useState<Cart | null>(null);
+
+  const idempotencyKeyRef = useRef<string | null>(null);
+
+  // --------------------------------------------------
+  // Queries
+  // --------------------------------------------------
+
+  const {
+    data: cart,
+    isLoading: isCartLoading,
+    isError: isCartError,
+    refetch: refetchCart,
+  } = useGetCartQuery(undefined, {
+    skip: !isAuthenticated,
+  });
+
+  const {
+    data: addresses = [],
+    isLoading: isAddressesLoading,
+    isError: isAddressesError,
+    refetch: refetchAddresses,
+  } = useGetAddressesQuery(undefined, {
+    skip: !isAuthenticated,
+  });
+
+  const {
+    data: payment,
+    isLoading: isPaymentLoading,
+  } = useGetPaymentQuery(pendingPaymentId ?? "", {
+    skip: !pendingPaymentId,
+    pollingInterval: 5000,
+    skipPollingIfUnfocused: true,
+  });
+
+  // --------------------------------------------------
+  // Mutations
+  // --------------------------------------------------
+
+  const [createAddress, createAddressState] =
+    useCreateAddressMutation();
+
+  const [updateAddress, updateAddressState] =
+    useUpdateAddressMutation();
+
+  const [deleteAddress, deleteAddressState] =
+    useDeleteAddressMutation();
+
+  const [createOrder, createOrderState] =
+    useCreateOrderMutation();
+
+  const [initializePayment, paymentState] =
+    useInitializePaymentMutation();
+
+  // --------------------------------------------------
+  // Authentication
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      router.replace("/login?next=/checkout");
+    }
+  }, [isAuthenticated, router]);
+
+  // --------------------------------------------------
+  // Select default address
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!addresses.length || selectedAddressId) {
+      return;
+    }
+
+    const defaultAddress = addresses.find(
+      (address) => address.is_default
+    );
+
+    setSelectedAddressId(
+      defaultAddress?.id ?? addresses[0].id
+    );
+  }, [addresses, selectedAddressId]);
+
+  // --------------------------------------------------
+  // Address handlers
+  // --------------------------------------------------
+
+  const handleAddressSubmit = async (
+    payload: AddressPayload
+  ) => {
+    setMessage("");
+
+    try {
+      if (editingAddress) {
+        const updated = await updateAddress({
+          id: editingAddress.id,
+          body: payload,
+        }).unwrap();
+
+        setSelectedAddressId(updated.id);
+      } else {
+        const created = await createAddress(
+          payload
+        ).unwrap();
+
+        setSelectedAddressId(created.id);
+      }
+
+      setEditingAddress(null);
+      setShowAddressForm(false);
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    }
+  };
+
+  const handleEditAddress = (address: Address) => {
+    setEditingAddress(address);
+    setShowAddressForm(true);
+    setMessage("");
+  };
+
+  const handleDeleteAddress = async (id: string) => {
+    if (
+      !window.confirm(
+        "آیا از حذف این آدرس مطمئن هستید؟"
+      )
+    ) {
+      return;
+    }
+
+    setMessage("");
+
+    try {
+      await deleteAddress(id).unwrap();
+
+      if (selectedAddressId === id) {
+        const remaining = addresses.filter(
+          (address) => address.id !== id
+        );
+
+        setSelectedAddressId(
+          remaining[0]?.id ?? null
+        );
+      }
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    }
+  };
+
+  const handleAddAddress = () => {
+    setEditingAddress(null);
+    setShowAddressForm(true);
+    setMessage("");
+  };
+
+  const handleCancelAddressForm = () => {
+    setEditingAddress(null);
+    setShowAddressForm(false);
+  };
+
+  // --------------------------------------------------
+  // Payment initialization
+  // --------------------------------------------------
+
+  const startPayment = async (order: Order) => {
+    setMessage("");
+
+    try {
+      if (!idempotencyKeyRef.current) {
+        idempotencyKeyRef.current =
+          crypto.randomUUID();
+      }
+
+      const result = await initializePayment({
+        order_id: order.id,
+        provider: "zarinpal",
+        idempotency_key: idempotencyKeyRef.current,
+      }).unwrap();
+
+      setPendingPaymentId(result.payment_id);
+
+      if (result.payment_url) {
+        window.location.assign(result.payment_url);
+        return;
+      }
+
+      setMessage(
+        "درخواست پرداخت ثبت شد، اما هنوز لینک انتقال به درگاه آماده نیست. وضعیت پرداخت در همین صفحه پیگیری می‌شود."
+      );
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    }
+  };
+
+  // --------------------------------------------------
+  // Create order
+  // --------------------------------------------------
+
+  const handleCheckout = async () => {
+    setMessage("");
+
+    // An existing order must not be recreated.
+    if (pendingOrder) {
+      await startPayment(pendingOrder);
+      return;
+    }
+
+    if (!selectedAddressId) {
+      setMessage(
+        "لطفاً ابتدا آدرس تحویل سفارش را انتخاب کنید."
+      );
+      return;
+    }
+
+    if (!cart || cart.items.length === 0) {
+      setMessage("سبد خرید شما خالی است.");
+      return;
+    }
+
+    const hasStockProblem = cart.items.some(
+      (item) =>
+        item.available_stock < 1 ||
+        item.quantity > item.available_stock
+    );
+
+    if (hasStockProblem) {
+      setMessage(
+        "موجودی بعضی از محصولات تغییر کرده است. لطفاً سبد خرید را بررسی کنید."
+      );
+      return;
+    }
+
+    try {
+      // Preserve the cart before order creation.
+      const cartBeforeOrder = cart;
+
+      const order = await createOrder({
+        address_id: selectedAddressId,
+        ...(couponCode.trim()
+          ? { coupon_code: couponCode.trim() }
+          : {}),
+      }).unwrap();
+
+      setCartSnapshot(cartBeforeOrder);
+      setPendingOrder(order);
+
+      // A new payment attempt for this newly created order.
+      idempotencyKeyRef.current = crypto.randomUUID();
+
+      await startPayment(order);
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    }
+  };
+
+  // --------------------------------------------------
+  // Loading / authentication states
+  // --------------------------------------------------
+
+  if (!isAuthenticated) {
+    return (
+      <main
+        dir="rtl"
+        className="mx-auto max-w-7xl px-4 py-24 text-center"
+      >
+        <p className="text-gray-500">
+          در حال انتقال به صفحه ورود...
+        </p>
+      </main>
+    );
+  }
+
+  if (isCartLoading || isAddressesLoading) {
+    return (
+      <main
+        dir="rtl"
+        className="mx-auto max-w-7xl animate-pulse px-4 py-16"
+      >
+        <div className="mb-8 h-8 w-48 rounded bg-gray-200" />
+
+        <div className="grid gap-8 lg:grid-cols-3">
+          <div className="space-y-4 lg:col-span-2">
+            <div className="h-40 rounded-2xl bg-gray-200" />
+            <div className="h-40 rounded-2xl bg-gray-200" />
+          </div>
+
+          <div className="h-72 rounded-2xl bg-gray-200" />
+        </div>
+      </main>
+    );
+  }
+
+  // --------------------------------------------------
+  // Resolve cart safely
+  // --------------------------------------------------
+
+  /*
+   * When the order is created, the backend may empty the cart.
+   * In that case, use the snapshot captured before order creation.
+   *
+   * This also handles the case where the cart query has no data
+   * but a previously captured snapshot is still available.
+   */
+
+  const currentCart = cart ?? cartSnapshot;
+
+  if (!currentCart) {
+    return (
+      <main
+        dir="rtl"
+        className="px-4 py-20 text-center"
+      >
+        <h1 className="font-bold text-gray-900">
+          {isCartError
+            ? "دریافت سبد خرید ناموفق بود."
+            : "اطلاعات سبد خرید در دسترس نیست."}
+        </h1>
+
+        <button
+          type="button"
+          onClick={() => void refetchCart()}
+          className="mt-5 rounded-xl bg-pink-600 px-6 py-3 text-sm text-white"
+        >
+          تلاش مجدد
+        </button>
+      </main>
+    );
+  }
+
+  const displayCart: Cart = pendingOrder
+    ? cartSnapshot ?? currentCart
+    : currentCart;
+
+  // --------------------------------------------------
+  // Derived state
+  // --------------------------------------------------
+
+  const hasStockProblem = displayCart.items.some(
+    (item) =>
+      item.available_stock < 1 ||
+      item.quantity > item.available_stock
+  );
+
+  const isSavingAddress =
+    createAddressState.isLoading ||
+    updateAddressState.isLoading;
+
+  const isSubmitting =
+    createOrderState.isLoading ||
+    paymentState.isLoading;
+
+  // --------------------------------------------------
+  // Empty cart
+  // --------------------------------------------------
+
+  if (
+    displayCart.items.length === 0 &&
+    !pendingOrder
+  ) {
+    return (
+      <main
+        dir="rtl"
+        className="px-4 py-20 text-center"
+      >
+        <h1 className="text-xl font-bold text-gray-900">
+          سبد خرید شما خالی است.
+        </h1>
+
+        <Link
+          href="/products"
+          className="mt-6 inline-block rounded-xl bg-pink-600 px-6 py-3 text-sm font-bold text-white"
+        >
+          مشاهده محصولات
+        </Link>
+      </main>
+    );
+  }
+
+  // --------------------------------------------------
+  // Payment status labels
+  // --------------------------------------------------
+
+  const paymentStatusLabels: Record<string, string> = {
+    initiated: "درخواست پرداخت در حال ثبت است.",
+    pending: "پرداخت در انتظار تأیید درگاه است.",
+    success: "پرداخت با موفقیت انجام شده است.",
+    failed: "پرداخت ناموفق بوده است.",
+    cancelled: "پرداخت لغو شده است.",
+    unknown: "وضعیت پرداخت هنوز مشخص نیست.",
+    review_required: "پرداخت نیازمند بررسی پشتیبانی است.",
+  };
+
+  // --------------------------------------------------
+  // Render
+  // --------------------------------------------------
+
+  return (
+    <main
+      dir="rtl"
+      className="min-h-screen bg-gray-50 text-gray-600"
+    >
+      <div className="mx-auto max-w-7xl px-4 py-10">
+        <div className="mb-10">
+          <h1 className="text-2xl font-bold text-gray-900">
+            تکمیل سفارش
+          </h1>
+
+          <p className="mt-2 text-sm text-gray-500">
+            آدرس تحویل و اطلاعات سفارش خود را بررسی کنید.
+          </p>
+        </div>
+
+        {message && (
+          <div
+            role="alert"
+            className="mb-6 rounded-xl border border-red-100 bg-red-50 p-4 text-sm leading-7 text-red-600"
+          >
+            {message}
+          </div>
+        )}
+
+        {isAddressesError && (
+          <div className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-600">
+            دریافت آدرس‌ها ناموفق بود.
+
+            <button
+              type="button"
+              onClick={() => void refetchAddresses()}
+              className="mr-3 font-bold underline"
+            >
+              تلاش مجدد
+            </button>
+          </div>
+        )}
+
+        <div className="grid items-start gap-8 lg:grid-cols-3">
+          <div className="space-y-8 lg:col-span-2">
+            {/* Address section */}
+
+            <section className="rounded-2xl border border-gray-100 bg-white p-5 sm:p-6">
+              <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900">
+                    آدرس تحویل سفارش
+                  </h2>
+
+                  <p className="mt-1 text-xs text-gray-500">
+                    آدرس موردنظر برای ارسال سفارش را انتخاب کنید.
+                  </p>
+                </div>
+
+                {!showAddressForm && !pendingOrder && (
+                  <button
+                    type="button"
+                    onClick={handleAddAddress}
+                    className="rounded-xl border border-pink-200 px-4 py-2.5 text-sm font-semibold text-pink-600 hover:bg-pink-50"
+                  >
+                    افزودن آدرس جدید
+                  </button>
+                )}
+              </div>
+
+              {showAddressForm && !pendingOrder ? (
+                <AddressForm
+                  initialAddress={editingAddress}
+                  isSaving={isSavingAddress}
+                  onSubmit={handleAddressSubmit}
+                  onCancel={handleCancelAddressForm}
+                />
+              ) : (
+                <AddressSelector
+                  addresses={addresses}
+                  selectedAddressId={selectedAddressId}
+                  onSelect={setSelectedAddressId}
+                  onEdit={handleEditAddress}
+                  onDelete={handleDeleteAddress}
+                  isDeleting={deleteAddressState.isLoading}
+                />
+              )}
+            </section>
+
+            {/* Order items */}
+
+            <section className="rounded-2xl border border-gray-100 bg-white p-5 sm:p-6">
+              <div className="mb-5 flex items-center justify-between">
+                <h2 className="text-lg font-bold text-gray-900">
+                  محصولات سفارش
+                </h2>
+
+                {!pendingOrder && (
+                  <Link
+                    href="/cart"
+                    className="text-sm font-medium text-pink-600"
+                  >
+                    ویرایش سبد خرید
+                  </Link>
+                )}
+              </div>
+
+              <div className="space-y-4">
+                {displayCart.items.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center gap-4 border-b border-gray-100 pb-4 last:border-0 last:pb-0"
+                  >
+                    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-gray-100">
+                      {item.product_image ? (
+                        <img
+                          src={item.product_image}
+                          alt={item.product_name}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-xs text-gray-400">
+                          بدون تصویر
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <h3 className="truncate text-sm font-semibold text-gray-800">
+                        {item.product_name}
+                      </h3>
+
+                      <p className="mt-1 text-xs text-gray-500">
+                        {item.variant_name || item.sku}
+                      </p>
+
+                      <p className="mt-1 text-xs text-gray-400">
+                        تعداد:{" "}
+                        {item.quantity.toLocaleString("fa-IR")}
+                      </p>
+                    </div>
+
+                    <strong className="shrink-0 text-sm text-gray-800">
+                      {Number(item.line_total).toLocaleString("fa-IR")}
+                      {" تومان"}
+                    </strong>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Payment status */}
+
+            {pendingPaymentId && (
+              <section className="rounded-2xl border border-gray-100 bg-white p-5">
+                <h2 className="font-bold text-gray-900">
+                  وضعیت پرداخت
+                </h2>
+
+                {isPaymentLoading && !payment ? (
+                  <p className="mt-3 text-sm text-gray-500">
+                    در حال دریافت وضعیت پرداخت...
+                  </p>
+                ) : payment ? (
+                  <>
+                    <p className="mt-3 text-sm leading-7 text-gray-600">
+                      {paymentStatusLabels[payment.status] ??
+                        payment.status}
+                    </p>
+
+                    <p className="mt-2 text-xs text-gray-400">
+                      شماره سفارش: {payment.order_number}
+                    </p>
+
+                    {payment.review_reason && (
+                      <p className="mt-2 text-xs text-amber-600">
+                        علت نیاز به بررسی: {payment.review_reason}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="mt-3 text-sm text-gray-500">
+                    دریافت اطلاعات پرداخت امکان‌پذیر نبود.
+                  </p>
+                )}
+              </section>
+            )}
+          </div>
+
+          {/* Summary */}
+
+          <div className="space-y-4 lg:sticky lg:top-6">
+            {pendingOrder && (
+              <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm leading-7 text-amber-800">
+                سفارش شما با شماره{" "}
+                <strong>{pendingOrder.order_number}</strong>{" "}
+                ثبت شده است. در صورت بروز مشکل در اتصال به درگاه،
+                از دکمه تلاش مجدد برای ادامه پرداخت همین سفارش استفاده کنید.
+              </div>
+            )}
+
+            <CheckoutSummary
+              cart={displayCart}
+              order={pendingOrder}
+              couponCode={couponCode}
+              onCouponChange={setCouponCode}
+              disabled={
+                !pendingOrder &&
+                (!selectedAddressId || hasStockProblem)
+              }
+              isSubmitting={isSubmitting}
+              hasPendingOrder={Boolean(pendingOrder)}
+              onSubmit={() => void handleCheckout()}
+            />
+
+            {pendingOrder && (
+              <button
+                type="button"
+                onClick={() =>
+                  router.push(`/orders/${pendingOrder.id}`)
+                }
+                className="w-full rounded-xl border border-gray-200 bg-white px-5 py-3 text-sm font-semibold text-gray-600 hover:bg-gray-50"
+              >
+                مشاهده سفارش
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}

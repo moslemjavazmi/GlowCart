@@ -1,9 +1,14 @@
 export interface CartItem {
   id: string;
   variant_id: number;
+
   product_name: string;
   variant_name: string;
   sku: string;
+
+  available_stock: number;
+  product_image: string | null;
+
   unit_price: string;
   quantity: number;
   line_total: string;
@@ -12,9 +17,12 @@ export interface CartItem {
 export interface Cart {
   id: string;
   items: CartItem[];
+
   total_items: number;
   subtotal: string;
+
   guest_token?: string;
+
   created_at: string;
   updated_at: string;
 }

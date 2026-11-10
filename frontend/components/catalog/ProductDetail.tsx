@@ -7,7 +7,7 @@ import ProductGallery from "@/components/catalog/ProductGallery";
 import ProductVariantSelector from "@/components/catalog/ProductVariantSelector";
 
 import { useGetProductBySlugQuery } from "@/lib/redux/services/catalogApi";
-
+import AddToCartButton from "@/components/cart/AddToCartButton";
 interface ProductDetailProps {
   slug: string;
 }
@@ -148,45 +148,49 @@ export default function ProductDetail({
             />
 
             {selectedVariant && (
-              <div className="mt-7 rounded-2xl bg-gray-50 p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-sm text-gray-500">
-                    قیمت
-                  </span>
+              <>
+                <div className="mt-7 rounded-2xl bg-gray-50 p-5">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-sm text-gray-500">
+                      قیمت
+                    </span>
 
-                  <strong className="text-xl font-bold text-gray-900">
-                    {Number(selectedVariant.price).toLocaleString("fa-IR")}
-                  </strong>
+                    <strong className="text-xl font-bold text-gray-900">
+                      {Number(selectedVariant.price).toLocaleString("fa-IR")}
+                    </strong>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between gap-4">
+                    <span className="text-sm text-gray-500">
+                      موجودی
+                    </span>
+
+                    <span
+                      className={`text-sm font-semibold ${
+                        selectedVariant.stock > 0
+                          ? "text-green-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {selectedVariant.stock > 0
+                        ? `${selectedVariant.stock.toLocaleString("fa-IR")} عدد`
+                        : "ناموجود"}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between gap-4">
+                    <span className="text-sm text-gray-500">
+                      کد محصول
+                    </span>
+
+                    <span className="text-sm font-medium text-gray-700">
+                      {selectedVariant.sku}
+                    </span>
+                  </div>
                 </div>
 
-                <div className="mt-4 flex items-center justify-between gap-4">
-                  <span className="text-sm text-gray-500">
-                    موجودی
-                  </span>
-
-                  <span
-                    className={`text-sm font-semibold ${
-                      selectedVariant.stock > 0
-                        ? "text-green-600"
-                        : "text-red-600"
-                    }`}
-                  >
-                    {selectedVariant.stock > 0
-                      ? `${selectedVariant.stock.toLocaleString("fa-IR")} عدد`
-                      : "ناموجود"}
-                  </span>
-                </div>
-
-                <div className="mt-4 flex items-center justify-between gap-4">
-                  <span className="text-sm text-gray-500">
-                    کد محصول
-                  </span>
-
-                  <span className="text-sm font-medium text-gray-700">
-                    {selectedVariant.sku}
-                  </span>
-                </div>
-              </div>
+                <AddToCartButton variant={selectedVariant} />
+              </>
             )}
 
             {!hasAvailableVariant && (

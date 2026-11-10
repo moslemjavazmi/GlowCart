@@ -5,6 +5,7 @@ Django settings for config project.
 import os
 from pathlib import Path
 from datetime import timedelta
+from corsheaders.defaults import default_headers
 
 from dotenv import load_dotenv
 
@@ -287,7 +288,13 @@ PAYMENT_INITIATED_STALE_AFTER_SECONDS = int(
 # --------------------------------------------------
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+]
+
+CORS_ALLOW_HEADERS = [
+    *default_headers,
+    "x-guest-cart-token",
 ]

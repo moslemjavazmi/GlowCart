@@ -1,3 +1,4 @@
+
 const GUEST_CART_TOKEN_KEY = "glowcart_guest_cart_token";
 
 export const cartStorage = {

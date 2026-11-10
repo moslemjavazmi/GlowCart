@@ -4,6 +4,7 @@ import { useRef } from "react";
 import { Provider } from "react-redux";
 
 import { makeStore, type AppStore } from "./store";
+import CartInitializer from "@/components/cart/CartInitializer";
 
 type StoreProviderProps = {
   children: React.ReactNode;
@@ -20,6 +21,7 @@ export default function StoreProvider({
 
   return (
     <Provider store={storeRef.current}>
+      <CartInitializer />
       {children}
     </Provider>
   );

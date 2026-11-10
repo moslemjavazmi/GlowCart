@@ -51,29 +51,40 @@ def get_request_cart(request):
     return cart, None
 
 
-def cart_response(cart, *, status_code=status.HTTP_200_OK):
+def cart_response(
+    cart,
+    request,
+    status_code=status.HTTP_200_OK,
+):
     cart = (
         Cart.objects
         .prefetch_related(
             Prefetch(
                 "items",
-                queryset=CartItem.objects.select_related(
-                    "variant",
-                    "variant__product",
+                queryset=(
+                    CartItem.objects
+                    .select_related(
+                        "variant",
+                        "variant__product",
+                    )
+                    .prefetch_related(
+                        "variant__product__images"
+                    )
                 ),
             )
         )
         .get(pk=cart.pk)
     )
 
-    data = CartSerializer(cart).data
+    data = CartSerializer(
+        cart,
+        context={"request": request},
+    ).data
 
     if cart.guest_token:
         data["guest_token"] = str(cart.guest_token)
 
     return Response(data, status=status_code)
-
-
 class CartView(APIView):
     permission_classes = [AllowAny]
 
@@ -83,7 +94,7 @@ class CartView(APIView):
         if error:
             return error
 
-        return cart_response(cart)
+        return cart_response(cart, request)
 
 
 class AddCartItemView(APIView):
@@ -110,7 +121,7 @@ class AddCartItemView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        return cart_response(cart)
+        return cart_response(cart, request)
 
 
 class UpdateCartItemView(APIView):
@@ -137,7 +148,7 @@ class UpdateCartItemView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        return cart_response(cart)
+        return cart_response(cart, request)
 
 
 class RemoveCartItemView(APIView):
@@ -165,7 +176,7 @@ class ClearCartView(APIView):
 
         clear_cart(cart=cart)
 
-        return cart_response(cart)
+        return cart_response(cart, request)
 
 
 class MergeGuestCartView(APIView):
@@ -193,4 +204,4 @@ class MergeGuestCartView(APIView):
             guest_token=guest_token,
         )
 
-        return cart_response(cart)
+        return cart_response(cart, request)

@@ -1,3 +1,4 @@
+
 import { baseApi } from "./baseApi";
 
 import { cartStorage } from "./cartStorage";
@@ -16,26 +17,34 @@ import type {
 
 import type { AppDispatch } from "../store";
 
+// ذخیره و همگام‌سازی Guest Token
 function syncGuestToken(
   data: Cart,
   dispatch: AppDispatch
 ): void {
   console.log("[Cart] syncGuestToken executed");
-  console.log("[Cart] Received data:", data);
-  console.log("[Cart] Guest token:", data.guest_token);
+  console.log("[Cart] Received cart:", data);
 
-  if (!data.guest_token) {
-    console.warn("[Cart] Guest token is missing");
+  const guestToken = data?.guest_token;
+
+  console.log("[Cart] Guest token:", guestToken);
+
+  if (!guestToken) {
+    console.warn("[Cart] Response does not contain guest_token");
     return;
   }
 
-  cartStorage.setGuestToken(data.guest_token);
-  dispatch(setGuestToken(data.guest_token));
+  try {
+    cartStorage.setGuestToken(guestToken);
+    dispatch(setGuestToken(guestToken));
 
-  console.log(
-    "[Cart] Saved token:",
-    localStorage.getItem("glowcart_guest_cart_token")
-  );
+    console.log(
+      "[Cart] Token saved successfully:",
+      cartStorage.getGuestToken()
+    );
+  } catch (error) {
+    console.error("[Cart] Failed to save guest token:", error);
+  }
 }
 
 export const cartApi = baseApi.injectEndpoints({
@@ -50,12 +59,16 @@ export const cartApi = baseApi.injectEndpoints({
       providesTags: ["Cart"],
 
       async onQueryStarted(_, { dispatch, queryFulfilled }) {
+        console.log("[Cart] getCart started");
+
         try {
           const { data } = await queryFulfilled;
 
+          console.log("[Cart] getCart fulfilled:", data);
+
           syncGuestToken(data, dispatch);
-        } catch {
-          // console.error("[Cart] getCart failed:", error);
+        } catch (error) {
+          console.error("[Cart] getCart failed:", error);
         }
       },
     }),
@@ -73,10 +86,9 @@ export const cartApi = baseApi.injectEndpoints({
       async onQueryStarted(_, { dispatch, queryFulfilled }) {
         try {
           const { data } = await queryFulfilled;
-
-          await syncGuestToken(data, dispatch);
-        } catch {
-          // خطا توسط RTK Query مدیریت می‌شود.
+          syncGuestToken(data, dispatch);
+        } catch (error) {
+          console.error("[Cart] addCartItem failed:", error);
         }
       },
     }),
@@ -123,13 +135,15 @@ export const cartApi = baseApi.injectEndpoints({
       invalidatesTags: ["Cart"],
 
       async onQueryStarted(_, { dispatch, queryFulfilled }) {
-          try {
-            await queryFulfilled;
+        try {
+          await queryFulfilled;
 
-            cartStorage.clearGuestToken();
-            dispatch(clearGuestToken());
-        } catch {
-          // در صورت شکست Merge، Guest Token را حفظ می‌کنیم.
+          cartStorage.clearGuestToken();
+          dispatch(clearGuestToken());
+
+          console.log("[Cart] Guest cart merged successfully");
+        } catch (error) {
+          console.error("[Cart] Guest cart merge failed:", error);
         }
       },
     }),

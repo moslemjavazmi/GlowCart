@@ -65,7 +65,7 @@ export default function ProductListing() {
   const count = data?.count ?? 0;
 
   return (
-    <main className="min-h-screen bg-gray-50">
+    <main className="min-h-screen bg-gray-50 text-gray-700">
       <section className="border-b border-gray-100 bg-white">
         <div className="mx-auto max-w-7xl px-4 py-10">
           <p className="mb-2 text-sm font-medium text-pink-600">
