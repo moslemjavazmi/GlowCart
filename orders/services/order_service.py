@@ -1,5 +1,9 @@
 
 import uuid
+import hashlib
+
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from datetime import timedelta
 from decimal import Decimal
 
@@ -27,26 +31,127 @@ def generate_order_number():
 
     return f"GC-{date_part}-{random_part}"
 
+def build_checkout_request_hash(
+    *,
+    address_id,
+    coupon_code,
+):
+    normalized_coupon = (
+        coupon_code.strip().upper()
+        if coupon_code
+        else ""
+    )
+
+    raw_value = (
+        f"{address_id}:{normalized_coupon}"
+    )
+
+    return hashlib.sha256(
+        raw_value.encode("utf-8")
+    ).hexdigest()
+
+
+def get_existing_checkout_order(
+    *,
+    user,
+    idempotency_key,
+    request_hash,
+):
+    existing_order = (
+        Order.objects
+        .filter(
+            checkout_idempotency_key=idempotency_key
+        )
+        .first()
+    )
+
+    if not existing_order:
+        return None
+
+    if existing_order.user_id != user.id:
+        raise ValidationError({
+            "idempotency_key": (
+                "This key belongs to another checkout request."
+            )
+        })
+
+    if existing_order.checkout_request_hash != request_hash:
+        raise ValidationError({
+            "idempotency_key": (
+                "This key has already been used with "
+                "different checkout data."
+            )
+        })
+
+    return existing_order
+
+
+
+def create_order(
+    *,
+    user,
+    address_id,
+    coupon_code=None,
+    idempotency_key,
+):
+    request_hash = build_checkout_request_hash(
+        address_id=address_id,
+        coupon_code=coupon_code,
+    )
+
+    try:
+        return _create_order_atomic(
+            user=user,
+            address_id=address_id,
+            coupon_code=coupon_code,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+
+    except IntegrityError:
+        existing_order = get_existing_checkout_order(
+            user=user,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+
+        if existing_order:
+            return existing_order, False
+
+        raise
+
 
 @transaction.atomic
-def create_order(*, user, address_id, coupon_code=None):
-    """
-    Create an order from the user's cart.
+def _create_order_atomic(
+    *,
+    user,
+    address_id,
+    coupon_code,
+    idempotency_key,
+    request_hash,
+):
+    User = get_user_model()
 
-    All operations are atomic:
-    - Address validation
-    - Cart locking
-    - Product variant locking
-    - Stock validation
-    - Order creation
-    - Coupon reservation
-    - Inventory reservation
-    - Cart clearing
-    """
+    # Serialize checkout requests for the same user.
+    User.objects.select_for_update().get(
+        pk=user.pk
+    )
 
-    # -----------------------------------------------------
+    # Check idempotency before accessing the cart.
+    existing_order = get_existing_checkout_order(
+        user=user,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+
+    if existing_order:
+        return existing_order, False
+
+    # -------------------------------------------------
+    # از اینجا به بعد منطق فعلی create_order تو اجرا می‌شود
+    # -------------------------------------------------
+
     # STEP 1: Validate address ownership
-    # -----------------------------------------------------
 
     address = Address.objects.filter(
         id=address_id,
@@ -58,9 +163,7 @@ def create_order(*, user, address_id, coupon_code=None):
             "address_id": "Address not found."
         })
 
-    # -----------------------------------------------------
     # STEP 2: Lock cart
-    # -----------------------------------------------------
 
     cart = (
         Cart.objects
@@ -74,9 +177,7 @@ def create_order(*, user, address_id, coupon_code=None):
             "cart": "Your cart is empty."
         })
 
-    # -----------------------------------------------------
     # STEP 3: Retrieve cart items
-    # -----------------------------------------------------
 
     cart_items = list(
         CartItem.objects
@@ -93,9 +194,7 @@ def create_order(*, user, address_id, coupon_code=None):
             "cart": "Your cart is empty."
         })
 
-    # -----------------------------------------------------
-    # STEP 4: Lock variants in deterministic order
-    # -----------------------------------------------------
+    # STEP 4: Lock variants
 
     variant_ids = [
         item.variant_id
@@ -113,15 +212,12 @@ def create_order(*, user, address_id, coupon_code=None):
         )
     }
 
-    # -----------------------------------------------------
     # STEP 5: Validate products and calculate subtotal
-    # -----------------------------------------------------
 
     subtotal = Decimal("0.00")
     order_items_data = []
 
     for cart_item in cart_items:
-
         variant = locked_variants.get(
             cart_item.variant_id
         )
@@ -169,26 +265,20 @@ def create_order(*, user, address_id, coupon_code=None):
             "line_total": line_total,
         })
 
-    # -----------------------------------------------------
-    # STEP 6: Calculate initial totals
-    # -----------------------------------------------------
+    # STEP 6: Calculate totals
 
     shipping_cost = Decimal("0.00")
     discount_amount = Decimal("0.00")
 
     total_amount = (
-        subtotal
-        + shipping_cost
-        - discount_amount
+        subtotal + shipping_cost - discount_amount
     )
 
     expires_at = (
         timezone.now() + timedelta(minutes=20)
     )
 
-    # -----------------------------------------------------
     # STEP 7: Create order
-    # -----------------------------------------------------
 
     order = Order.objects.create(
         order_number=generate_order_number(),
@@ -200,8 +290,9 @@ def create_order(*, user, address_id, coupon_code=None):
         discount_amount=discount_amount,
         total_amount=total_amount,
         expires_at=expires_at,
+        checkout_idempotency_key=idempotency_key,
+        checkout_request_hash=request_hash,
 
-        # Address snapshot
         recipient_name=address.recipient_name,
         phone_number=address.phone_number,
         province=address.province,
@@ -210,26 +301,19 @@ def create_order(*, user, address_id, coupon_code=None):
         address_line=address.address_line,
     )
 
-    # -----------------------------------------------------
     # STEP 8: Create order items
-    # -----------------------------------------------------
 
-    order_items = [
+    OrderItem.objects.bulk_create([
         OrderItem(
             order=order,
             **item_data,
         )
         for item_data in order_items_data
-    ]
+    ])
 
-    OrderItem.objects.bulk_create(order_items)
+    # STEP 9: Reserve coupon
 
-    # -----------------------------------------------------
-    # STEP 9: Reserve coupon if supplied
-    # -----------------------------------------------------
-
-    if coupon_code and coupon_code.strip():
-
+    if coupon_code:
         coupon_reservation = reserve_coupon(
             code=coupon_code,
             user=user,
@@ -242,16 +326,14 @@ def create_order(*, user, address_id, coupon_code=None):
         )
 
         total_amount = (
-            subtotal
-            + shipping_cost
-            - discount_amount
+            subtotal + shipping_cost - discount_amount
         )
 
         if total_amount <= Decimal("0.00"):
             raise ValidationError({
                 "coupon": (
-                    "The discount cannot make the order total "
-                    "zero or negative."
+                    "The discount cannot make the order "
+                    "total zero or negative."
                 )
             })
 
@@ -266,31 +348,21 @@ def create_order(*, user, address_id, coupon_code=None):
             ]
         )
 
-    # -----------------------------------------------------
-    # STEP 10: Validate final amount
-    # -----------------------------------------------------
-
     if order.total_amount <= Decimal("0.00"):
         raise ValidationError({
             "total_amount": "Invalid order total."
         })
 
-    # -----------------------------------------------------
-    # STEP 11: Deduct stock and create reservations
-    # -----------------------------------------------------
+    # STEP 10: Reserve inventory
 
     reservations = []
 
     for item_data in order_items_data:
-
         variant = item_data["variant"]
         quantity = item_data["quantity"]
 
         variant.stock -= quantity
-
-        variant.save(
-            update_fields=["stock"]
-        )
+        variant.save(update_fields=["stock"])
 
         reservations.append(
             InventoryReservation(
@@ -306,12 +378,8 @@ def create_order(*, user, address_id, coupon_code=None):
         reservations
     )
 
-    # -----------------------------------------------------
-    # STEP 12: Clear cart
-    # -----------------------------------------------------
+    # STEP 11: Clear cart
 
-    CartItem.objects.filter(
-        cart=cart
-    ).delete()
+    CartItem.objects.filter(cart=cart).delete()
 
-    return order
+    return order, True

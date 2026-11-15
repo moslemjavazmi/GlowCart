@@ -83,6 +83,8 @@ class CreateOrderSerializer(serializers.Serializer):
 
     address_id = serializers.UUIDField()
 
+    idempotency_key = serializers.UUIDField(required=True)
+
     coupon_code = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -105,6 +107,4 @@ class CreateOrderSerializer(serializers.Serializer):
 
     def validate_coupon_code(self, value):
         value = value.strip().upper()
-
-        # Empty coupon means no coupon.
         return value or None

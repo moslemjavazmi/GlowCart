@@ -16,23 +16,44 @@ import {
   useDeleteAddressMutation,
 } from "@/lib/redux/services/addressApi";
 
-import { useCreateOrderMutation } from "@/lib/redux/services/orderApi";
-
 import {
   useInitializePaymentMutation,
   useGetPaymentQuery,
 } from "@/lib/redux/services/paymentApi";
 
+import {
+  useCreateOrderMutation,
+  useGetOrderQuery,
+} from "@/lib/redux/services/orderApi";
+
 import type { Cart } from "@/lib/redux/features/cart/cartTypes";
+
 import type {
   Address,
   AddressPayload,
 } from "@/lib/redux/features/addresses/addressTypes";
+
 import type { Order } from "@/lib/redux/features/orders/orderTypes";
+
+import {
+  createCheckoutSession,
+  getCheckoutSession,
+  saveCheckoutSession,
+  clearCheckoutSession,
+  type CheckoutSession,
+} from "@/lib/utils/checkoutStorage";
+import {
+  selectIsAuthenticated,
+  selectIsAuthInitialized,
+} from "@/lib/redux/features/auth/authSelectors";
 
 import AddressForm from "@/components/checkout/AddressForm";
 import AddressSelector from "@/components/checkout/AddressSelector";
 import CheckoutSummary from "@/components/checkout/CheckoutSummary";
+
+// --------------------------------------------------
+// Error helper
+// --------------------------------------------------
 
 function getErrorMessage(error: unknown): string {
   const apiError = error as {
@@ -75,12 +96,15 @@ function getErrorMessage(error: unknown): string {
   );
 }
 
+// ==================================================
+// Checkout page
+// ==================================================
+
 export default function CheckoutPage() {
   const router = useRouter();
 
-  const isAuthenticated = useAppSelector(
-    (state) => state.auth.isAuthenticated
-  );
+  const isAuthenticated = useAppSelector(selectIsAuthenticated);
+  const isAuthInitialized = useAppSelector(selectIsAuthInitialized);
 
   // --------------------------------------------------
   // Local state
@@ -108,7 +132,11 @@ export default function CheckoutPage() {
   const [cartSnapshot, setCartSnapshot] =
     useState<Cart | null>(null);
 
-  const idempotencyKeyRef = useRef<string | null>(null);
+  const [checkoutReady, setCheckoutReady] =
+    useState(false);
+
+  const checkoutSessionRef =
+    useRef<CheckoutSession | null>(null);
 
   // --------------------------------------------------
   // Queries
@@ -132,14 +160,34 @@ export default function CheckoutPage() {
     skip: !isAuthenticated,
   });
 
+  // Payment query
   const {
-    data: payment,
+    currentData: payment,
     isLoading: isPaymentLoading,
   } = useGetPaymentQuery(pendingPaymentId ?? "", {
     skip: !pendingPaymentId,
     pollingInterval: 5000,
     skipPollingIfUnfocused: true,
   });
+
+  // Recover previously created order
+  const {
+    currentData: recoveredOrder,
+    isLoading: isRecoveredOrderLoading,
+    isError: isRecoveredOrderError,
+    refetch: refetchRecoveredOrder,
+  } = useGetOrderQuery(
+    checkoutSessionRef.current?.orderId ?? "",
+    {
+      skip:
+        !checkoutReady ||
+        !checkoutSessionRef.current?.orderId,
+    }
+  );
+
+  // Prefer the order already in state.
+  // Otherwise use the order recovered from the backend.
+  const activeOrder = pendingOrder ?? recoveredOrder ?? null;
 
   // --------------------------------------------------
   // Mutations
@@ -160,15 +208,105 @@ export default function CheckoutPage() {
   const [initializePayment, paymentState] =
     useInitializePaymentMutation();
 
+// --------------------------------------------------
+// Authentication
+// --------------------------------------------------
+
+useEffect(() => {
+  if (!isAuthInitialized) return;
+
+  if (!isAuthenticated) {
+    router.replace("/login?next=%2Fcheckout");
+  }
+}, [isAuthenticated, isAuthInitialized, router]);
+
   // --------------------------------------------------
-  // Authentication
+  // Restore checkout session
   // --------------------------------------------------
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      router.replace("/login?next=/checkout");
+    if (!isAuthenticated) return;
+
+    const savedSession = getCheckoutSession();
+
+    if (savedSession) {
+      checkoutSessionRef.current = savedSession;
+
+      setPendingPaymentId(savedSession.paymentId);
+      setCartSnapshot(savedSession.cartSnapshot);
+    } else {
+      const newSession = createCheckoutSession();
+
+      checkoutSessionRef.current = newSession;
     }
-  }, [isAuthenticated, router]);
+
+    setCheckoutReady(true);
+  }, [isAuthenticated]);
+
+  // --------------------------------------------------
+  // Recover order
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (recoveredOrder) {
+      setPendingOrder(recoveredOrder);
+    }
+  }, [recoveredOrder]);
+
+  useEffect(() => {
+    if (!isRecoveredOrderError) return;
+
+    setMessage(
+      "بازیابی سفارش از سرور ناموفق بود. برای جلوگیری از ثبت سفارش تکراری، ابتدا بازیابی سفارش را دوباره امتحان کنید."
+    );
+  }, [isRecoveredOrderError]);
+
+  // --------------------------------------------------
+  // Payment status handling
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!payment || !checkoutSessionRef.current) {
+      return;
+    }
+
+    const session = checkoutSessionRef.current;
+
+    // Payment succeeded
+    if (payment.status === "success") {
+      const paymentId = payment.payment_id;
+
+      clearCheckoutSession();
+
+      checkoutSessionRef.current = null;
+
+      router.replace(
+        `/payment/result?payment_id=${encodeURIComponent(
+          paymentId
+        )}`
+      );
+
+      return;
+    }
+
+    // Payment failed or cancelled:
+    // Keep the order, but create a new payment attempt key.
+    if (
+      (payment.status === "failed" ||
+        payment.status === "cancelled") &&
+      session.paymentId === payment.payment_id
+    ) {
+      session.paymentId = null;
+      session.paymentIdempotencyKey =
+        crypto.randomUUID();
+
+      checkoutSessionRef.current = session;
+
+      saveCheckoutSession(session);
+
+      setPendingPaymentId(null);
+    }
+  }, [payment, router]);
 
   // --------------------------------------------------
   // Select default address
@@ -272,17 +410,32 @@ export default function CheckoutPage() {
   const startPayment = async (order: Order) => {
     setMessage("");
 
+    const session = checkoutSessionRef.current;
+
+    if (!session) {
+      setMessage(
+        "اطلاعات نشست پرداخت در دسترس نیست. صفحه را مجدداً بارگذاری کنید."
+      );
+      return;
+    }
+
     try {
-      if (!idempotencyKeyRef.current) {
-        idempotencyKeyRef.current =
-          crypto.randomUUID();
-      }
+      // Save the key before sending the request.
+      saveCheckoutSession(session);
 
       const result = await initializePayment({
         order_id: order.id,
         provider: "zarinpal",
-        idempotency_key: idempotencyKeyRef.current,
+        idempotency_key:
+          session.paymentIdempotencyKey,
       }).unwrap();
+
+      session.orderId = order.id;
+      session.paymentId = result.payment_id;
+
+      checkoutSessionRef.current = session;
+
+      saveCheckoutSession(session);
 
       setPendingPaymentId(result.payment_id);
 
@@ -295,6 +448,9 @@ export default function CheckoutPage() {
         "درخواست پرداخت ثبت شد، اما هنوز لینک انتقال به درگاه آماده نیست. وضعیت پرداخت در همین صفحه پیگیری می‌شود."
       );
     } catch (error) {
+      // Keep the same idempotency key after network errors.
+      saveCheckoutSession(session);
+
       setMessage(getErrorMessage(error));
     }
   };
@@ -306,9 +462,21 @@ export default function CheckoutPage() {
   const handleCheckout = async () => {
     setMessage("");
 
-    // An existing order must not be recreated.
-    if (pendingOrder) {
-      await startPayment(pendingOrder);
+    if (!checkoutReady) {
+      setMessage("لطفاً چند لحظه صبر کنید.");
+      return;
+    }
+
+    // If the order already exists, never create another one.
+    if (activeOrder) {
+      await startPayment(activeOrder);
+      return;
+    }
+
+    if (isRecoveredOrderError) {
+      setMessage(
+        "ابتدا باید سفارش قبلی را از سرور بازیابی کنید."
+      );
       return;
     }
 
@@ -337,32 +505,110 @@ export default function CheckoutPage() {
       return;
     }
 
-    try {
-      // Preserve the cart before order creation.
-      const cartBeforeOrder = cart;
+    const session =
+      checkoutSessionRef.current ??
+      createCheckoutSession();
 
+    checkoutSessionRef.current = session;
+
+    // Persist cart snapshot and order key before request.
+    session.cartSnapshot = cart;
+
+    saveCheckoutSession(session);
+
+    setCartSnapshot(cart);
+
+    try {
       const order = await createOrder({
         address_id: selectedAddressId,
+        idempotency_key:
+          session.orderIdempotencyKey,
         ...(couponCode.trim()
           ? { coupon_code: couponCode.trim() }
           : {}),
       }).unwrap();
 
-      setCartSnapshot(cartBeforeOrder);
-      setPendingOrder(order);
+      // Save order ID immediately.
+      session.orderId = order.id;
 
-      // A new payment attempt for this newly created order.
-      idempotencyKeyRef.current = crypto.randomUUID();
+      checkoutSessionRef.current = session;
+
+      saveCheckoutSession(session);
+
+      setPendingOrder(order);
 
       await startPayment(order);
     } catch (error) {
+      // Keep the same order idempotency key.
+      saveCheckoutSession(session);
+
       setMessage(getErrorMessage(error));
     }
   };
 
   // --------------------------------------------------
-  // Loading / authentication states
+  // Derived state
   // --------------------------------------------------
+
+  const currentCart = cart ?? cartSnapshot;
+
+  const displayCart: Cart | null = activeOrder
+    ? cartSnapshot ?? currentCart
+    : currentCart;
+
+  const hasStockProblem = Boolean(
+    displayCart?.items.some(
+      (item) =>
+        item.available_stock < 1 ||
+        item.quantity > item.available_stock
+    )
+  );
+
+  const isSavingAddress =
+    createAddressState.isLoading ||
+    updateAddressState.isLoading;
+
+  const isSubmitting =
+    createOrderState.isLoading ||
+    paymentState.isLoading;
+
+  // Prevent a second attempt while payment is unresolved.
+  const paymentBlocksNewAttempt =
+    payment?.status === "unknown" ||
+    payment?.status === "review_required" ||
+    payment?.status === "pending" ||
+    payment?.status === "initiated";
+
+  // This becomes true when a previous order ID exists,
+  // but the backend has not returned that order yet.
+  const isRecoveringOrder =
+    checkoutReady &&
+    Boolean(checkoutSessionRef.current?.orderId) &&
+    isRecoveredOrderLoading &&
+    !activeOrder;
+
+  // --------------------------------------------------
+  // Loading states
+  // --------------------------------------------------
+
+  if (
+    !isAuthInitialized ||
+    (isAuthenticated && !checkoutReady) ||
+    isRecoveringOrder
+  ) {
+    return (
+      <main
+        dir="rtl"
+        className="px-4 py-20 text-center"
+      >
+        <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-pink-100 border-t-pink-600" />
+
+        <p className="mt-5 text-sm text-gray-500">
+          در حال بازیابی اطلاعات سفارش...
+        </p>
+      </main>
+    );
+  }
 
   if (!isAuthenticated) {
     return (
@@ -398,20 +644,10 @@ export default function CheckoutPage() {
   }
 
   // --------------------------------------------------
-  // Resolve cart safely
+  // Cart availability
   // --------------------------------------------------
 
-  /*
-   * When the order is created, the backend may empty the cart.
-   * In that case, use the snapshot captured before order creation.
-   *
-   * This also handles the case where the cart query has no data
-   * but a previously captured snapshot is still available.
-   */
-
-  const currentCart = cart ?? cartSnapshot;
-
-  if (!currentCart) {
+  if (!displayCart) {
     return (
       <main
         dir="rtl"
@@ -434,35 +670,13 @@ export default function CheckoutPage() {
     );
   }
 
-  const displayCart: Cart = pendingOrder
-    ? cartSnapshot ?? currentCart
-    : currentCart;
-
-  // --------------------------------------------------
-  // Derived state
-  // --------------------------------------------------
-
-  const hasStockProblem = displayCart.items.some(
-    (item) =>
-      item.available_stock < 1 ||
-      item.quantity > item.available_stock
-  );
-
-  const isSavingAddress =
-    createAddressState.isLoading ||
-    updateAddressState.isLoading;
-
-  const isSubmitting =
-    createOrderState.isLoading ||
-    paymentState.isLoading;
-
   // --------------------------------------------------
   // Empty cart
   // --------------------------------------------------
 
   if (
     displayCart.items.length === 0 &&
-    !pendingOrder
+    !activeOrder
   ) {
     return (
       <main
@@ -493,8 +707,9 @@ export default function CheckoutPage() {
     success: "پرداخت با موفقیت انجام شده است.",
     failed: "پرداخت ناموفق بوده است.",
     cancelled: "پرداخت لغو شده است.",
-    unknown: "وضعیت پرداخت هنوز مشخص نیست.",
-    review_required: "پرداخت نیازمند بررسی پشتیبانی است.",
+    unknown: "وضعیت پرداخت هنوز مشخص نیست. لطفاً پرداخت دیگری انجام ندهید.",
+    review_required:
+      "پرداخت نیازمند بررسی پشتیبانی است. لطفاً پرداخت جدیدی انجام ندهید.",
   };
 
   // --------------------------------------------------
@@ -507,6 +722,8 @@ export default function CheckoutPage() {
       className="min-h-screen bg-gray-50 text-gray-600"
     >
       <div className="mx-auto max-w-7xl px-4 py-10">
+        {/* Header */}
+
         <div className="mb-10">
           <h1 className="text-2xl font-bold text-gray-900">
             تکمیل سفارش
@@ -517,6 +734,8 @@ export default function CheckoutPage() {
           </p>
         </div>
 
+        {/* General message */}
+
         {message && (
           <div
             role="alert"
@@ -526,8 +745,13 @@ export default function CheckoutPage() {
           </div>
         )}
 
+        {/* Address error */}
+
         {isAddressesError && (
-          <div className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-600">
+          <div
+            role="alert"
+            className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-600"
+          >
             دریافت آدرس‌ها ناموفق بود.
 
             <button
@@ -540,7 +764,32 @@ export default function CheckoutPage() {
           </div>
         )}
 
+        {/* Order recovery error */}
+
+        {isRecoveredOrderError && (
+          <div
+            role="alert"
+            className="mb-6 rounded-xl border border-red-100 bg-red-50 p-4 text-sm leading-7 text-red-600"
+          >
+            <p>
+              بازیابی سفارش از سرور ناموفق بود. برای
+              جلوگیری از ثبت سفارش تکراری، ابتدا بازیابی
+              سفارش را دوباره امتحان کنید.
+            </p>
+
+            <button
+              type="button"
+              onClick={() => void refetchRecoveredOrder()}
+              className="mt-3 font-bold underline"
+            >
+              تلاش مجدد برای بازیابی سفارش
+            </button>
+          </div>
+        )}
+
         <div className="grid items-start gap-8 lg:grid-cols-3">
+          {/* Main column */}
+
           <div className="space-y-8 lg:col-span-2">
             {/* Address section */}
 
@@ -556,7 +805,7 @@ export default function CheckoutPage() {
                   </p>
                 </div>
 
-                {!showAddressForm && !pendingOrder && (
+                {!showAddressForm && !activeOrder && (
                   <button
                     type="button"
                     onClick={handleAddAddress}
@@ -567,7 +816,7 @@ export default function CheckoutPage() {
                 )}
               </div>
 
-              {showAddressForm && !pendingOrder ? (
+              {showAddressForm && !activeOrder ? (
                 <AddressForm
                   initialAddress={editingAddress}
                   isSaving={isSavingAddress}
@@ -594,7 +843,7 @@ export default function CheckoutPage() {
                   محصولات سفارش
                 </h2>
 
-                {!pendingOrder && (
+                {!activeOrder && (
                   <Link
                     href="/cart"
                     className="text-sm font-medium text-pink-600"
@@ -686,42 +935,42 @@ export default function CheckoutPage() {
             )}
           </div>
 
-          {/* Summary */}
+          {/* Summary column */}
 
           <div className="space-y-4 lg:sticky lg:top-6">
-            {pendingOrder && (
+            {activeOrder && (
               <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm leading-7 text-amber-800">
                 سفارش شما با شماره{" "}
-                <strong>{pendingOrder.order_number}</strong>{" "}
-                ثبت شده است. در صورت بروز مشکل در اتصال به درگاه،
-                از دکمه تلاش مجدد برای ادامه پرداخت همین سفارش استفاده کنید.
+                <strong>{activeOrder.order_number}</strong>{" "}
+                ثبت شده است. برای ادامه، از دکمه پرداخت مجدد
+                استفاده کنید. این کار سفارش جدیدی ایجاد نمی‌کند.
               </div>
             )}
 
             <CheckoutSummary
               cart={displayCart}
-              order={pendingOrder}
+              order={activeOrder}
               couponCode={couponCode}
               onCouponChange={setCouponCode}
               disabled={
-                !pendingOrder &&
-                (!selectedAddressId || hasStockProblem)
+                isRecoveringOrder ||
+                isRecoveredOrderError ||
+                paymentBlocksNewAttempt ||
+                (!activeOrder &&
+                  (!selectedAddressId || hasStockProblem))
               }
               isSubmitting={isSubmitting}
-              hasPendingOrder={Boolean(pendingOrder)}
+              hasPendingOrder={Boolean(activeOrder)}
               onSubmit={() => void handleCheckout()}
             />
 
-            {pendingOrder && (
-              <button
-                type="button"
-                onClick={() =>
-                  router.push(`/orders/${pendingOrder.id}`)
-                }
-                className="w-full rounded-xl border border-gray-200 bg-white px-5 py-3 text-sm font-semibold text-gray-600 hover:bg-gray-50"
+            {activeOrder && (
+              <Link
+                href={`/orders/${activeOrder.id}`}
+                className="block w-full rounded-xl border border-gray-200 bg-white px-5 py-3 text-center text-sm font-semibold text-gray-600 hover:bg-gray-50"
               >
-                مشاهده سفارش
-              </button>
+                مشاهده جزئیات سفارش
+              </Link>
             )}
           </div>
         </div>

@@ -5,11 +5,8 @@ from django.utils import timezone
 
 from rest_framework.exceptions import ValidationError
 
-from orders.models import (
-    Order,
-    InventoryReservation,
-    ProductVariant,
-)
+from orders.models import Order, InventoryReservation
+from catalog.models import ProductVariant
 from payments.models import Payment
 from promotions.services.coupon_service import (
     release_coupon_reservation,

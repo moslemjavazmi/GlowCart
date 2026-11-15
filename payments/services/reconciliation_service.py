@@ -12,6 +12,7 @@ from payments.services.payment_service import (
     _mark_payment_failed,
     _mark_payment_review_required,
     _store_verification_result,
+    _adopt_early_callback_authority,
 )
 
 
@@ -34,6 +35,19 @@ INITIATED_STALE_AFTER = timedelta(
 def reconcile_payment(payment_id):
 
     payment = Payment.objects.get(id=payment_id)
+
+# Recover an authority received through an early callback.
+    if (
+        payment.status in [
+            Payment.Status.INITIATED,
+            Payment.Status.UNKNOWN,
+        ]
+        and not payment.authority
+        and payment.callback_authority
+    ):
+        payment = _adopt_early_callback_authority(
+            payment.id
+        )
 
     # -----------------------------------------------------
     # STEP 1: Check final states

@@ -93,10 +93,15 @@ class ZarinpalGateway(PaymentGateway):
     # HTTP request
     # -----------------------------------------------------
 
-    def _post(self, endpoint: str, payload: dict) -> dict:
 
+    def _post(
+        self,
+        endpoint: str,
+        payload: dict,
+        *,
+        reject_client_errors: bool = False,
+    ) -> dict:
         try:
-
             response = requests.post(
                 f"{self.api_base}/{endpoint}.json",
                 json=payload,
@@ -106,33 +111,52 @@ class ZarinpalGateway(PaymentGateway):
                 },
                 timeout=(5, 20),
             )
-
-            response.raise_for_status()
-
         except requests.RequestException as exc:
-
             raise ZarinpalTransportError(
-                "Could not determine the result of the Zarinpal request."
+                f"Zarinpal connection error: "
+                f"{type(exc).__name__}: {str(exc)[:500]}"
             ) from exc
 
         try:
-
             response_data = response.json()
-
         except ValueError as exc:
-
             raise ZarinpalResponseError(
-                "Invalid JSON response from Zarinpal."
+                f"Invalid JSON response from Zarinpal. "
+                f"HTTP status: {response.status_code}"
             ) from exc
 
         if not isinstance(response_data, dict):
-
             raise ZarinpalResponseError(
                 "Unexpected response structure from Zarinpal."
             )
 
-        return response_data
+        if 400 <= response.status_code < 500:
+            errors = response_data.get("errors")
 
+            if isinstance(errors, dict):
+                if reject_client_errors:
+                    raise ZarinpalRejectedError(
+                        f"Zarinpal rejected request: "
+                        f"{errors.get('message', 'Unknown error')} "
+                        f"(code: {errors.get('code', 'unknown')})"
+                    )
+
+                # Verify errors are not automatically treated as
+                # definitive payment failures.
+                return response_data
+
+            raise ZarinpalResponseError(
+                f"Zarinpal client error. "
+                f"HTTP status: {response.status_code}"
+            )
+
+        if response.status_code >= 500:
+            raise ZarinpalTransportError(
+                f"Zarinpal server error. "
+                f"HTTP status: {response.status_code}"
+            )
+
+        return response_data
     # -----------------------------------------------------
     # Create payment
     # -----------------------------------------------------

@@ -3,10 +3,22 @@ import { baseApi } from "./baseApi";
 import type {
   Order,
   CreateOrderRequest,
+  CancelOrderResponse,
 } from "../features/orders/orderTypes";
+
+interface PaginatedOrdersResponse {
+  count?: number;
+  next?: string | null;
+  previous?: string | null;
+  results: Order[];
+}
 
 export const orderApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
+    // --------------------------------------------------
+    // Create order
+    // --------------------------------------------------
+
     createOrder: builder.mutation<Order, CreateOrderRequest>({
       query: (body) => ({
         url: "/orders/create/",
@@ -14,11 +26,15 @@ export const orderApi = baseApi.injectEndpoints({
         body,
       }),
 
-    invalidatesTags: [
-    { type: "Order", id: "LIST" },
-    "Cart",
-    ],
+      invalidatesTags: [
+        { type: "Order", id: "LIST" },
+        "Cart",
+      ],
     }),
+
+    // --------------------------------------------------
+    // Get all orders
+    // --------------------------------------------------
 
     getOrders: builder.query<Order[], void>({
       query: () => ({
@@ -27,8 +43,8 @@ export const orderApi = baseApi.injectEndpoints({
       }),
 
       transformResponse: (
-        response: Order[] | { results: Order[] }
-      ) => {
+        response: Order[] | PaginatedOrdersResponse
+      ): Order[] => {
         return Array.isArray(response)
           ? response
           : response.results;
@@ -43,8 +59,14 @@ export const orderApi = baseApi.injectEndpoints({
               })),
               { type: "Order" as const, id: "LIST" },
             ]
-          : [{ type: "Order" as const, id: "LIST" }],
+          : [
+              { type: "Order" as const, id: "LIST" },
+            ],
     }),
+
+    // --------------------------------------------------
+    // Get single order
+    // --------------------------------------------------
 
     getOrder: builder.query<Order, string>({
       query: (id) => ({
@@ -57,8 +79,12 @@ export const orderApi = baseApi.injectEndpoints({
       ],
     }),
 
+    // --------------------------------------------------
+    // Cancel order
+    // --------------------------------------------------
+
     cancelOrder: builder.mutation<
-      Order,
+      CancelOrderResponse,
       string
     >({
       query: (orderId) => ({
@@ -69,6 +95,7 @@ export const orderApi = baseApi.injectEndpoints({
       invalidatesTags: (_result, _error, id) => [
         { type: "Order", id },
         { type: "Order", id: "LIST" },
+        "Cart",
       ],
     }),
   }),

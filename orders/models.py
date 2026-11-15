@@ -157,6 +157,19 @@ class Order(models.Model):
         null=True,
         blank=True,
     )
+    checkout_idempotency_key = models.UUIDField(
+    null=True,
+    blank=True,
+    unique=True,
+    editable=False,
+    )
+
+    checkout_request_hash = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        editable=False,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

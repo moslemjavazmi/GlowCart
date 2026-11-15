@@ -49,7 +49,7 @@ class AddressViewSet(viewsets.ModelViewSet):
     def set_default(self, request, pk=None):
         address = self.get_object()
 
-        set_default_address(
+        address = set_default_address(
             address=address,
             user=request.user,
         )

@@ -120,7 +120,46 @@ def _lock_order_and_payment(payment_id):
 
     return order, payment
 
+def _adopt_early_callback_authority(payment_id):
+    """
+    Adopt an authority received through an early callback.
 
+    The authority is not trusted by itself.
+    It must still be verified directly with the gateway.
+    """
+
+    with transaction.atomic():
+        _, payment = _lock_order_and_payment(payment_id)
+
+        if payment.authority:
+            return payment
+
+        if (
+            payment.status in [
+                Payment.Status.INITIATED,
+                Payment.Status.UNKNOWN,
+            ]
+            and payment.callback_authority
+        ):
+            payment.authority = payment.callback_authority
+            payment.status = Payment.Status.UNKNOWN
+
+            payment.callback_authority = None
+            payment.callback_status = None
+            payment.callback_received_at = None
+
+            payment.save(
+                update_fields=[
+                    "authority",
+                    "status",
+                    "callback_authority",
+                    "callback_status",
+                    "callback_received_at",
+                    "updated_at",
+                ]
+            )
+
+        return payment
 def _mark_payment_failed(
     payment_id,
     result,
@@ -454,7 +493,7 @@ def initialize_payment(
 
     except ZarinpalRejectedError as exc:
 
-        _mark_payment_failed(
+        failed_payment = _mark_payment_failed(
             payment_id,
             {
                 "raw_response": {
@@ -465,21 +504,40 @@ def initialize_payment(
             allow_initiated=True,
         )
 
-        raise PaymentGatewayError(
-            "The payment gateway rejected the payment request."
-        ) from exc
+        return _payment_result(
+            failed_payment,
+            reused=False,
+        )
 
     except Exception as exc:
 
-        _mark_payment_unknown(
+        unknown_payment = _mark_payment_unknown(
             payment_id,
             exc,
         )
 
-        raise PaymentGatewayError(
-            "The payment outcome is unknown. "
-            "Do not create another payment attempt yet."
-        ) from exc
+        # A callback may have arrived before the gateway
+        # request timed out.
+        unknown_payment = _adopt_early_callback_authority(
+            payment_id
+        )
+
+        # If an early callback supplied an authority,
+        # verify it instead of leaving it unresolved.
+        if unknown_payment.authority:
+
+            try:
+                unknown_payment = verify_payment(
+                    payment_id
+                )
+
+            except PaymentGatewayError:
+                unknown_payment.refresh_from_db()
+
+        return _payment_result(
+            unknown_payment,
+            reused=False,
+        )
 
     # -----------------------------------------------------
     # STEP 3: Save Gateway Response

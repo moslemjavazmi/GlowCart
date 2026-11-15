@@ -60,6 +60,15 @@ class InitializePaymentView(APIView):
 
         payment = result["payment"]
 
+        response_status = (
+            status.HTTP_202_ACCEPTED
+            if payment.status in [
+                Payment.Status.INITIATED,
+                Payment.Status.UNKNOWN,
+            ]
+            else status.HTTP_200_OK
+        )
+
         return Response(
             {
                 "payment_id": str(payment.id),
@@ -69,7 +78,7 @@ class InitializePaymentView(APIView):
                 "payment_url": result["payment_url"],
                 "reused": result["reused"],
             },
-            status=status.HTTP_200_OK,
+            status=response_status,
         )
 
 
@@ -106,6 +115,11 @@ class PaymentDetailView(APIView):
                 "provider": payment.provider,
                 "provider_reference": payment.provider_reference,
                 "review_reason": payment.review_reason,
+                "payment_url": (
+                    payment.payment_url
+                    if payment.status == Payment.Status.PENDING
+                    else None
+                ),
                 "paid_at": payment.paid_at,
                 "created_at": payment.created_at,
             },
